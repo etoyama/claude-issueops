@@ -9,8 +9,11 @@ To prevent accidental activation in normal operation, fixture loading is
 guarded by a **double check** on environment variables:
 
   - ``CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE``: path to a JSON fixture. The
-    path must resolve to a location *inside* a directory named
-    ``verification-fixtures`` (path-traversal attempts are rejected).
+    resolved path must be inside ``<project_dir>/verification-fixtures/``
+    where ``project_dir`` is taken from ``CLAUDE_PROJECT_DIR`` (or cwd as
+    a fallback). Anchoring against the project root prevents an attacker
+    from creating a same-named directory anywhere on disk to bypass the
+    check (#32).
   - ``CLAUDE_ISSUEOPS_VERIFICATION_MODE``: must be exactly ``"1"``.
 
 If both are set and valid, the JSON is parsed and returned as a ``dict``.
@@ -48,6 +51,7 @@ FIXTURE_SCHEMA_VERSION = 1
 
 _ENV_FIXTURE = "CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE"
 _ENV_MODE = "CLAUDE_ISSUEOPS_VERIFICATION_MODE"
+_ENV_PROJECT_DIR = "CLAUDE_PROJECT_DIR"
 
 
 def _warn(message: str) -> None:
@@ -56,16 +60,32 @@ def _warn(message: str) -> None:
     sys.stderr.write(f"[verification_fixture] {message}\n")
 
 
-def _path_is_under_fixture_dir(resolved: Path) -> bool:
-    """Return True iff any path component is ``verification-fixtures``.
+def _project_dir_for_fixture() -> Path:
+    """Resolve the project directory used to anchor fixture paths.
 
-    Using component membership (rather than ``startswith`` against a fixed
-    prefix) keeps the check robust against the project's working directory:
-    the fixture lives at ``<repo>/verification-fixtures/<file>`` regardless
-    of how the user invoked the skill.
+    Prefers ``CLAUDE_PROJECT_DIR`` (the canonical reference for this
+    codebase) and falls back to cwd so test harnesses that ``chdir`` into
+    a tmp_path keep working without setting the env var.
     """
 
-    return _FIXTURE_DIR_NAME in resolved.parts
+    raw = os.environ.get(_ENV_PROJECT_DIR)
+    if raw:
+        return Path(raw).resolve(strict=False)
+    return Path.cwd().resolve(strict=False)
+
+
+def _path_is_under_fixture_dir(resolved: Path, expected_root: Path) -> bool:
+    """Return True iff ``resolved`` lives under ``expected_root``.
+
+    Uses :meth:`Path.is_relative_to` against ``<project_dir>/verification-fixtures``
+    so an attacker cannot bypass the check by creating a same-named directory
+    elsewhere on disk (#32). Both inputs must already be ``resolve()``-d.
+    """
+
+    try:
+        return resolved.is_relative_to(expected_root)
+    except ValueError:
+        return False
 
 
 def load_fixture_or_none() -> dict | None:
@@ -114,10 +134,11 @@ def load_fixture_or_none() -> dict | None:
         _warn(f"could not resolve fixture path {fixture_value!r}: {exc}")
         return None
 
-    if not _path_is_under_fixture_dir(resolved):
+    expected_root = (_project_dir_for_fixture() / _FIXTURE_DIR_NAME).resolve(strict=False)
+    if not _path_is_under_fixture_dir(resolved, expected_root):
         _warn(
             f"fixture path {fixture_value!r} is not under "
-            f"{_FIXTURE_DIR_NAME}/; refusing to load."
+            f"{expected_root}/; refusing to load."
         )
         return None
 

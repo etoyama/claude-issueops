@@ -126,3 +126,87 @@ def test_verification_fixture_silent_when_neither_set(
     captured = capsys.readouterr()
     # In normal operation (neither var set), the loader must be silent.
     assert captured.err == ""
+
+
+# #32: anchor against CLAUDE_PROJECT_DIR so a same-named directory outside
+# the project root cannot satisfy the check.
+def test_verification_fixture_rejects_same_named_dir_outside_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    # Attacker-controlled location: a verification-fixtures directory living
+    # OUTSIDE the project root. The old component-membership check would
+    # accept this; the anchored check (#32) must reject it.
+    attacker_dir = tmp_path / "attacker" / "verification-fixtures"
+    attacker_dir.mkdir(parents=True)
+    payload = {"schema_version": 1, "responses": [{"question_id": "q", "selections": ["x"]}]}
+    bogus = attacker_dir / "payload.json"
+    bogus.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+    monkeypatch.setenv("CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE", str(bogus))
+    monkeypatch.setenv("CLAUDE_ISSUEOPS_VERIFICATION_MODE", "1")
+
+    result = load_fixture_or_none()
+
+    assert result is None
+    captured = capsys.readouterr()
+    assert "verification-fixtures" in captured.err.lower()
+    assert "refusing to load" in captured.err
+
+
+# #32: traversal attempts via .. components must also be rejected.
+def test_verification_fixture_rejects_path_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project_dir = tmp_path / "project"
+    fixtures_dir = project_dir / "verification-fixtures"
+    fixtures_dir.mkdir(parents=True)
+
+    # File exists outside the fixtures dir; traversal path tries to reach it.
+    secret = tmp_path / "etc-passwd-lookalike"
+    secret.write_text(json.dumps({"schema_version": 1, "responses": []}), encoding="utf-8")
+
+    traversal = fixtures_dir / ".." / ".." / "etc-passwd-lookalike"
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+    monkeypatch.setenv("CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE", str(traversal))
+    monkeypatch.setenv("CLAUDE_ISSUEOPS_VERIFICATION_MODE", "1")
+
+    result = load_fixture_or_none()
+
+    assert result is None
+    captured = capsys.readouterr()
+    assert "refusing to load" in captured.err
+
+
+# #32: when CLAUDE_PROJECT_DIR is set, fixtures inside it must still load.
+def test_verification_fixture_loads_when_anchored_via_project_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project_dir = tmp_path / "project"
+    fixtures_dir = project_dir / "verification-fixtures"
+    fixtures_dir.mkdir(parents=True)
+    payload = {"schema_version": 1, "responses": []}
+    fixture = fixtures_dir / "v1.json"
+    fixture.write_text(json.dumps(payload), encoding="utf-8")
+
+    # cwd is intentionally NOT inside project_dir to prove anchoring uses
+    # CLAUDE_PROJECT_DIR rather than cwd.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+    monkeypatch.setenv("CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE", str(fixture))
+    monkeypatch.setenv("CLAUDE_ISSUEOPS_VERIFICATION_MODE", "1")
+
+    result = load_fixture_or_none()
+
+    assert result == payload
+    assert capsys.readouterr().err == ""
