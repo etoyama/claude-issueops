@@ -221,3 +221,10 @@ __marimo__/
 # Per-session state files written by hooks and the session-closer skill.
 # Default location is ${claudeProjectDir}/session-state/<session_id>.json.
 session-state/
+
+# spec-workflow MCP — personal artifacts and auto-generated templates.
+# user-templates/ and steering/ are project-specific config and ARE committed.
+.spec-workflow/specs/
+.spec-workflow/approvals/
+.spec-workflow/archive/
+.spec-workflow/templates/
