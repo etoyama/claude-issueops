@@ -83,15 +83,20 @@ def gh_post_fn_factory() -> Callable[..., Callable[..., Any]]:
 
     Each call pops the next entry from ``results`` (or raises if no
     results left). Pass plain values to be returned, or ``Exception``
-    instances to raise. The factory exposes ``calls`` so tests can
-    assert on call history.
+    instances to raise. The factory exposes ``calls`` as ``list[(args, kwargs)]``
+    — same shape as :func:`gh_view_comments_fn_factory` and
+    :func:`gh_list_in_progress_fn_factory` so test assertions stay
+    uniform across factories (#31).
 
     Example::
 
         gh_post = gh_post_fn_factory(results=[None, RuntimeError("boom")])
         gh_post(10, "body 1")           # returns None
-        gh_post(10, "body 2")           # raises RuntimeError
-        assert gh_post.calls == [(10, "body 1"), (10, "body 2")]
+        gh_post(10, "body 2", cwd=p)    # raises RuntimeError
+        assert gh_post.calls == [
+            ((10, "body 1"), {}),
+            ((10, "body 2"), {"cwd": p}),
+        ]
     """
 
     def _factory(*, results: list[Any] | None = None) -> Callable[..., Any]:
@@ -99,7 +104,7 @@ def gh_post_fn_factory() -> Callable[..., Callable[..., Any]]:
         calls: list[tuple] = []
 
         def _fn(*args: Any, **kwargs: Any) -> Any:
-            calls.append(args + (tuple(sorted(kwargs.items())),) if kwargs else args)
+            calls.append((args, kwargs))
             if not queue:
                 return None
             value = queue.pop(0)

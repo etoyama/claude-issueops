@@ -1,0 +1,502 @@
+"""Bin-level dispatch tests for ``bin/session_closer.py``.
+
+The bin file is the JSON-in/JSON-out adapter that Claude Code's skill
+calls. Per design.md it must:
+
+- Always exit 0 and emit a single parseable JSON document on stdout —
+  even on failure (the skill needs the structured error to render the
+  3-choice dialog).
+- Validate ``schema_version`` and ``subcommand`` before any
+  payload-specific parsing so a stale skill client gets the same
+  ``internal`` error regardless of which subcommand it called.
+- Translate ``FileNotFoundError`` from ``read-transcript`` to the
+  ``transcript-missing`` error kind that SKILL.md routes specially.
+- Never abort on a single per-decision gh failure inside
+  ``post-decisions`` (R-9 graceful degradation).
+
+These tests load the bin module via importlib (so the
+``sys.path.insert`` at the top of the file does not contaminate other
+test modules) and call the handlers / dispatcher directly, monkey-patching
+the gh adapters so no real subprocess fires.
+
+This file plugs the 0% coverage gap on ``bin/session_closer.py`` flagged
+in the post-#8 team review (#31).
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import io
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from issueops.gh_adapters import GhFailure, GhFailureKind, PostResult
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_BIN_FILE = _REPO_ROOT / "bin" / "session_closer.py"
+
+
+@pytest.fixture(scope="module")
+def bin_mod():
+    """Import ``bin/session_closer.py`` once per module via importlib.
+
+    A regular ``import`` won't work because ``bin/`` is not on
+    ``sys.path``. We load by file path and register under a unique
+    module name so the import is repeatable.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_test_bin_session_closer", _BIN_FILE
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _ok_post(slug: str) -> PostResult:
+    return PostResult(
+        ok=True,
+        comment_url=f"https://github.com/x/y/issues/1#c-{slug}",
+        failure=None,
+    )
+
+
+def _fail_post(kind: GhFailureKind = GhFailureKind.NETWORK) -> PostResult:
+    return PostResult(
+        ok=False,
+        comment_url=None,
+        failure=GhFailure(kind=kind, stderr="boom", exit_code=1, hint=None),
+    )
+
+
+def _candidate_payload(slug: str = "alpha") -> dict[str, Any]:
+    return {
+        "slug": slug,
+        "what": f"do {slug}",
+        "why": f"because {slug}",
+        "alternatives": f"not {slug}",
+        "consequences": f"{slug} happens",
+        "scope_hint": "issue",
+    }
+
+
+def _user_decision_payload(slug: str = "alpha") -> dict[str, Any]:
+    return {
+        "candidate": _candidate_payload(slug),
+        "final_scope": "issue",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher: schema / subcommand / payload validation (always exit 0,
+# always JSON, kind="internal" on validation failure).
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_rejects_schema_version_mismatch(bin_mod):
+    response = bin_mod._dispatch({"schema_version": 99, "subcommand": "summary"})
+    assert response["ok"] is False
+    assert response["error"]["kind"] == "internal"
+    assert "schema_version" in response["error"]["message"]
+
+
+def test_dispatch_rejects_unknown_subcommand(bin_mod):
+    response = bin_mod._dispatch(
+        {"schema_version": bin_mod.SCHEMA_VERSION, "subcommand": "no-such-cmd"}
+    )
+    assert response["ok"] is False
+    assert response["error"]["kind"] == "internal"
+    assert "no-such-cmd" in response["error"]["message"]
+
+
+def test_dispatch_rejects_non_object_payload(bin_mod):
+    response = bin_mod._dispatch(
+        {
+            "schema_version": bin_mod.SCHEMA_VERSION,
+            "subcommand": "summary",
+            "payload": "not-a-dict",
+        }
+    )
+    assert response["ok"] is False
+    assert response["error"]["kind"] == "internal"
+
+
+def test_dispatch_translates_keyerror_to_internal(bin_mod):
+    """A handler missing a required field should surface as ``internal``
+    (not as an unhandled ``KeyError`` that strands the skill)."""
+    response = bin_mod._dispatch(
+        {
+            "schema_version": bin_mod.SCHEMA_VERSION,
+            "subcommand": "commit-state",
+            "payload": {},  # missing session_id
+        }
+    )
+    assert response["ok"] is False
+    assert response["error"]["kind"] == "internal"
+
+
+# ---------------------------------------------------------------------------
+# read-transcript: success + transcript-missing routing.
+# ---------------------------------------------------------------------------
+
+
+def test_handle_read_transcript_returns_content_and_offset(
+    tmp_path: Path, bin_mod
+):
+    transcript = tmp_path / "session.transcript"
+    transcript.write_text("line1\nline2\nline3\n", encoding="utf-8")
+
+    response = bin_mod._handle_read_transcript(
+        {"transcript_path": str(transcript), "offset": 0}
+    )
+
+    assert response["ok"] is True
+    assert "line1" in response["result"]["content"]
+    assert response["result"]["end_offset"] == transcript.stat().st_size
+
+
+def test_handle_read_transcript_missing_routes_to_transcript_missing(
+    tmp_path: Path, bin_mod
+):
+    bogus = tmp_path / "does-not-exist.transcript"
+
+    response = bin_mod._dispatch(
+        {
+            "schema_version": bin_mod.SCHEMA_VERSION,
+            "subcommand": "read-transcript",
+            "payload": {"transcript_path": str(bogus), "offset": 0},
+        }
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["kind"] == "transcript-missing"
+
+
+# ---------------------------------------------------------------------------
+# resolve-issue: integration with branch + in-progress fallback.
+# ---------------------------------------------------------------------------
+
+
+def test_handle_resolve_issue_uses_branch_number(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    # Tier 1 (in-progress list) is consulted, but the branch number wins
+    # when present. Empty in-progress list means Tier 2 (branch) decides.
+    monkeypatch.setattr(bin_mod, "gh_list_in_progress", lambda **_kw: [])
+
+    response = bin_mod._handle_resolve_issue(
+        {"branch": "feat/77-something", "project_dir": str(tmp_path)}
+    )
+    assert response["ok"] is True
+    assert response["result"]["issue_number"] == 77
+
+
+def test_handle_resolve_issue_ambiguous_returns_candidates(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(bin_mod, "gh_list_in_progress", lambda **_kw: [10, 20])
+
+    response = bin_mod._handle_resolve_issue(
+        {"branch": "master", "project_dir": str(tmp_path)}
+    )
+    assert response["ok"] is True
+    assert response["result"]["ambiguous"] is True
+    assert sorted(response["result"]["candidates"]) == [10, 20]
+
+
+def test_handle_resolve_issue_returns_error_when_unresolvable(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(bin_mod, "gh_list_in_progress", lambda **_kw: [])
+    response = bin_mod._handle_resolve_issue(
+        {"branch": "master", "project_dir": str(tmp_path)}
+    )
+    assert response["ok"] is False
+    assert response["error"]["kind"] == "issue-resolution"
+
+
+# ---------------------------------------------------------------------------
+# post-decisions: graceful degradation on per-decision failures.
+# ---------------------------------------------------------------------------
+
+
+def test_handle_post_decisions_partial_failure_records_each(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    queue = [_ok_post("a"), _fail_post(GhFailureKind.AUTH), _ok_post("c")]
+
+    def fake_post(issue, body, *, cwd):
+        return queue.pop(0)
+
+    monkeypatch.setattr(bin_mod, "gh_post_comment", fake_post)
+
+    response = bin_mod._handle_post_decisions(
+        {
+            "issue_number": 99,
+            "project_dir": str(tmp_path),
+            "decisions": [
+                _user_decision_payload("a"),
+                _user_decision_payload("b"),
+                _user_decision_payload("c"),
+            ],
+        }
+    )
+
+    assert response["ok"] is True
+    res = response["result"]
+    assert res["posted"] == ["a", "c"]
+    # The single failure should appear with its kind, not abort the loop.
+    assert len(res["failed"]) == 1
+    assert res["failed"][0]["slug"] == "b"
+    assert res["failed"][0]["kind"] == GhFailureKind.AUTH.value
+    # The last failure surfaces gh_failure_kind for SKILL.md's dialog.
+    assert res["gh_failure_kind"] == GhFailureKind.AUTH.value
+
+
+# ---------------------------------------------------------------------------
+# filter-dedup: gh failure during Tier 2 is reported but doesn't abort.
+# ---------------------------------------------------------------------------
+
+
+def test_handle_filter_dedup_records_tier2_skip_kind(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    def boom(issue, *, cwd):
+        raise GhFailure(
+            kind=GhFailureKind.RATE_LIMIT, stderr="rate", exit_code=1
+        )
+
+    monkeypatch.setattr(bin_mod, "gh_view_comments", boom)
+
+    response = bin_mod._handle_filter_dedup(
+        {
+            "issue_number": 1,
+            "project_dir": str(tmp_path),
+            "candidates": [_candidate_payload("alpha")],
+            "captured_slugs": [],
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["result"]["tier2_skipped_kind"] == GhFailureKind.RATE_LIMIT.value
+    # The candidate survives Tier 1 (no local-slug match) and Tier 2 was
+    # skipped, so it remains in the output.
+    assert len(response["result"]["candidates"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# commit-state: thin wrapper around merge_update_state writes a real file.
+# ---------------------------------------------------------------------------
+
+
+def test_handle_commit_state_writes_state_file(tmp_path: Path, bin_mod):
+    response = bin_mod._handle_commit_state(
+        {
+            "session_id": "sess-bin-cs",
+            "patch": {"skill_ran_at": "2026-04-25T12:00:00+00:00"},
+            "project_dir": str(tmp_path),
+        }
+    )
+
+    assert response["ok"] is True
+    state_path = Path(response["result"]["state_path"])
+    assert state_path.exists()
+    data = json.loads(state_path.read_text())
+    assert data["skill_ran_at"] == "2026-04-25T12:00:00+00:00"
+
+
+def test_handle_commit_state_rejects_non_object_patch(tmp_path: Path, bin_mod):
+    response = bin_mod._handle_commit_state(
+        {
+            "session_id": "sess-bin-cs2",
+            "patch": "not-a-dict",
+            "project_dir": str(tmp_path),
+        }
+    )
+    assert response["ok"] is False
+    assert response["error"]["kind"] == "internal"
+
+
+# ---------------------------------------------------------------------------
+# summary: idempotency + view/post failure routing.
+# ---------------------------------------------------------------------------
+
+
+def test_handle_summary_idempotent_when_marker_already_present(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    sid = "sess-bin-sum-idem"
+    marker_body = (
+        "<!-- claude-issueops:session-closer:summary:" + sid + " -->\n"
+        "## Session summary\n"
+    )
+    monkeypatch.setattr(
+        bin_mod,
+        "gh_view_comments",
+        lambda issue, *, cwd: [{"body": marker_body}],
+    )
+    # Post must not be called when idempotent.
+    monkeypatch.setattr(
+        bin_mod,
+        "gh_post_comment",
+        lambda *a, **kw: pytest.fail("idempotent path must not post"),
+    )
+
+    response = bin_mod._handle_summary(
+        {
+            "issue_number": 1,
+            "session_id": sid,
+            "project_dir": str(tmp_path),
+        }
+    )
+    assert response["ok"] is True
+    assert response["result"]["posted"] is False
+    assert response["result"]["skipped"] == "idempotent"
+
+
+def test_handle_summary_view_failure_returns_view_failed(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    def view_boom(issue, *, cwd):
+        raise GhFailure(kind=GhFailureKind.NETWORK, stderr="net", exit_code=1)
+
+    monkeypatch.setattr(bin_mod, "gh_view_comments", view_boom)
+
+    response = bin_mod._handle_summary(
+        {
+            "issue_number": 1,
+            "session_id": "sess-bin-sum-vf",
+            "project_dir": str(tmp_path),
+        }
+    )
+    assert response["ok"] is True
+    assert response["result"]["posted"] is False
+    assert response["result"]["skipped"] == "view-failed"
+    assert response["result"]["gh_failure_kind"] == GhFailureKind.NETWORK.value
+
+
+def test_handle_summary_posts_when_no_existing_marker(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(bin_mod, "gh_view_comments", lambda issue, *, cwd: [])
+    monkeypatch.setattr(
+        bin_mod,
+        "gh_post_comment",
+        lambda issue, body, *, cwd: _ok_post("summary"),
+    )
+
+    response = bin_mod._handle_summary(
+        {
+            "issue_number": 1,
+            "session_id": "sess-bin-sum-new",
+            "project_dir": str(tmp_path),
+        }
+    )
+    assert response["ok"] is True
+    assert response["result"]["posted"] is True
+    assert "marker" in response["result"]
+
+
+# ---------------------------------------------------------------------------
+# escalate: only cross-issue decisions touch memory_dir.
+# ---------------------------------------------------------------------------
+
+
+def test_handle_escalate_writes_only_cross_issue(tmp_path: Path, bin_mod):
+    memory_dir = tmp_path / "memory"
+    cross = _user_decision_payload("global")
+    cross["final_scope"] = "cross-issue"
+    issue_scope = _user_decision_payload("local")  # final_scope = "issue"
+
+    response = bin_mod._handle_escalate(
+        {
+            "decisions": [cross, issue_scope],
+            "project_memory_dir": str(memory_dir),
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["result"]["written"] == ["global"]
+    # Issue-scope decisions must not create files in memory_dir.
+    files = [p.name for p in memory_dir.iterdir() if p.is_file()]
+    assert not any("local" in f for f in files)
+
+
+# ---------------------------------------------------------------------------
+# save-pending: appends a per-session pending file.
+# ---------------------------------------------------------------------------
+
+
+def test_handle_save_pending_writes_pending_file(tmp_path: Path, bin_mod):
+    response = bin_mod._handle_save_pending(
+        {
+            "session_id": "sess-bin-sp",
+            "issue_number": 7,
+            "decisions": [_user_decision_payload("a")],
+            "project_dir": str(tmp_path),
+        }
+    )
+
+    assert response["ok"] is True
+    pending = Path(response["result"]["pending_path"])
+    assert pending.exists()
+    data = json.loads(pending.read_text())
+    assert data["issue_number"] == 7
+    assert len(data["entries"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# main(): JSON-in / JSON-out + invalid stdin handling, exit 0 always.
+# ---------------------------------------------------------------------------
+
+
+def test_main_returns_internal_error_on_invalid_stdin_json(
+    bin_mod, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("not json"))
+    rc = bin_mod.main()
+    assert rc == 0  # exit 0 even on parse failure (skill needs the JSON)
+    out = capsys.readouterr().out
+    response = json.loads(out)
+    assert response["ok"] is False
+    assert response["error"]["kind"] == "internal"
+
+
+def test_main_returns_internal_error_on_non_object_stdin(
+    bin_mod, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    monkeypatch.setattr(sys, "stdin", io.StringIO('"a string is not an object"'))
+    rc = bin_mod.main()
+    assert rc == 0
+    response = json.loads(capsys.readouterr().out)
+    assert response["ok"] is False
+
+
+def test_main_dispatches_valid_envelope(
+    tmp_path: Path,
+    bin_mod,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    envelope = {
+        "schema_version": bin_mod.SCHEMA_VERSION,
+        "subcommand": "commit-state",
+        "payload": {
+            "session_id": "sess-bin-main",
+            "patch": {"skill_ran_at": "2026-04-25T12:00:00+00:00"},
+            "project_dir": str(tmp_path),
+        },
+    }
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(envelope)))
+    rc = bin_mod.main()
+    assert rc == 0
+    response = json.loads(capsys.readouterr().out)
+    assert response["ok"] is True
+    assert "state_path" in response["result"]
