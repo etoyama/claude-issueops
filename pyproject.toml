@@ -1,0 +1,18 @@
+[project]
+name = "claude-issueops"
+version = "0.1.0"
+description = "Persist session context and decisions across Claude Code sessions via GitHub Issues"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "etoyama" }]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
