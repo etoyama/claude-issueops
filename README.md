@@ -55,7 +55,7 @@ Defaults ship with the plugin. Override per-project in `.claude/settings.json`:
 ```jsonc
 {
   "issueops": {
-    "stateDir": "${claudeProjectDir}/session-state",
+    "stateDir": "${CLAUDE_PROJECT_DIR}/session-state",
     "branch": {
       "issuePattern": "(?:feat|fix|chore|refactor)/(\\d+)-",
       "fallback": "latest-in-progress"
@@ -73,7 +73,7 @@ Defaults ship with the plugin. Override per-project in `.claude/settings.json`:
 
 | Key | Default | Purpose |
 |---|---|---|
-| `stateDir` | `${claudeProjectDir}/session-state` | Per-session state file location. Must be gitignored. |
+| `stateDir` | `${CLAUDE_PROJECT_DIR}/session-state` | Per-session state file location. Must be gitignored. `CLAUDE_PROJECT_DIR` is the env var Claude Code exposes to plugin scripts. |
 | `branch.issuePattern` | `(?:feat\|fix\|chore\|refactor)/(\d+)-` | Regex with one capture group for the issue number. |
 | `branch.fallback` | `latest-in-progress` | What to do when the pattern does not match. Alternative: `none`. |
 | `projects.enabled` | `false` | Opt in to GitHub Projects v2 integration (added in v0.2). |
