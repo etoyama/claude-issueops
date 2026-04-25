@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "scenario": "V-4",
+  "description": "close mode: approve 2 candidates, mark one as cross-issue (memory escalation expected)",
+  "responses": [
+    {
+      "question_id": "approve-decisions",
+      "selections": [
+        "use-bin-adapter",
+        "atomic-state-write"
+      ]
+    },
+    {
+      "question_id": "scope:use-bin-adapter",
+      "selections": ["issue"]
+    },
+    {
+      "question_id": "scope:atomic-state-write",
+      "selections": ["cross-issue"]
+    }
+  ]
+}

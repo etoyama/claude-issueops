@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "scenario": "V-9",
+  "description": "AmbiguousResolution: two in-progress issues match; user picks $ISSUE_A. Override is passed to skill via --issue-number-override on re-invocation",
+  "responses": [
+    {
+      "question_id": "pick-target-issue",
+      "selections": ["${ISSUE_A}"]
+    },
+    {
+      "question_id": "approve-decisions",
+      "selections": ["use-bin-adapter"]
+    },
+    {
+      "question_id": "scope:use-bin-adapter",
+      "selections": ["issue"]
+    }
+  ]
+}

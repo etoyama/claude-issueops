@@ -161,3 +161,59 @@ def test_save_pending_restore_rejects_bad_session_id(tmp_path: Path):
             session_id="../escape",
             snapshot=_snapshot(),
         )
+
+
+def test_state_save_refactor_io_equivalence(tmp_path: Path):
+    """T-132: routing save_pending_restore through state_writer must keep
+    the on-disk JSON byte-for-byte equivalent to the pre-refactor shape.
+
+    The structural snapshot is embedded inline (no external fixture) so
+    callers reading this test see exactly what is contracted.
+
+    We also assert that no ``<file>.tmp.*`` residue remains after a
+    successful atomic write — the contract of state_writer.
+    """
+    fixed = datetime(2026, 4, 25, 12, 0, 0, tzinfo=timezone.utc)
+
+    # Prime the file with sibling fields that other hooks might own;
+    # the refactor must preserve them (atomic merge).
+    state_dir = tmp_path / "session-state"
+    state_dir.mkdir()
+    state_path = state_dir / "sess-compat.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "session_id": "sess-compat",
+                "briefing_done": True,
+                "last_summary_at": "2026-04-24T09:00:00+00:00",
+            }
+        )
+    )
+
+    save_pending_restore(
+        project_dir=tmp_path,
+        session_id="sess-compat",
+        snapshot=_snapshot(),
+        now=fixed,
+    )
+
+    expected_snapshot = {
+        "session_id": "sess-compat",
+        "briefing_done": True,
+        "last_summary_at": "2026-04-24T09:00:00+00:00",
+        "pending_restore": {
+            "schema_version": STATE_SCHEMA_VERSION,
+            "issue_number": 132,
+            "title": "feature: session continuity",
+            "body_excerpt": "We need to keep context across sessions.",
+            "decision_slugs": ["h2-replacement", "sessionstart-removal"],
+            "parent_epic": 7,
+            "saved_at": "2026-04-25T12:00:00+00:00",
+        },
+    }
+
+    assert json.loads(state_path.read_text()) == expected_snapshot
+
+    # Atomic-write contract: no leftover tmp files in the dir.
+    leftover = [p.name for p in state_dir.iterdir() if ".tmp." in p.name]
+    assert leftover == []

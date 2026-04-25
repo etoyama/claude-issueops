@@ -2,7 +2,7 @@
 
 Persist session context and decisions across Claude Code sessions via GitHub Issues.
 
-> Status: pre-release (v0.1 in development). Origin: this is the OSS extraction of [insight-blueprint#132](https://github.com/etoyama/insight-blueprint/issues/132).
+> Status: pre-release (v0.1 in development — continuity hooks and the `session-closer` skill have landed; marketplace listing pending). Origin: this is the OSS extraction of [insight-blueprint#132](https://github.com/etoyama/insight-blueprint/issues/132).
 
 ## What & Why
 
@@ -92,6 +92,26 @@ Three hooks ship in v0.1:
 
 `SessionStart` is intentionally not used: `UserPromptSubmit` runs at the same effective moment for context purposes and is the only hook that supports `additionalContext` injection both at session start and after compaction. A single hook keeps the lifecycle debuggable.
 
+## Skills
+
+### `session-closer`
+
+The skill that closes the loop: captures decisions back to the issue and (optionally) escalates cross-issue learnings to Claude's standard memory. Two modes:
+
+| Mode | Invocation | What it does |
+|---|---|---|
+| `capture` | `/claude-issueops:session-closer --capture` | Reads the recent transcript, asks for confirmation on each detected Decision via `AskUserQuestion`, posts approved Decisions as issue comments with the frozen marker, updates `state.captured_slugs`. Run mid-session whenever you reach a meaningful conclusion. |
+| `close` (default) | `/claude-issueops:session-closer` | Runs `capture` plus an idempotent session-summary comment, plus memory escalation for `final_scope = cross-issue` Decisions. Run at session end. |
+
+Key guarantees:
+
+- **Two-tier dedup**: a slug already in `state.captured_slugs` (Tier 1) or already present as a `decision:<slug>` marker on the issue (Tier 2) is skipped. Re-running the skill is safe.
+- **Subcommand separation**: posts are committed to GitHub *before* state is written. If state-write fails after a successful post, the next run sees the post via Tier 2 dedup and skips it. The state file always reflects what was actually posted.
+- **gh failure → 3-choice fallback**: on `gh` error the skill asks save / discard / abort. "save" persists the unposted Decisions to `<sid>.pending-decisions.json` so they can be retried in a later session.
+- **AmbiguousResolution**: when the branch + `status:in-progress` label combination yields multiple candidate issues, the skill prompts to pick one before posting.
+
+If the user forgets to invoke the skill, the `SessionEnd` fallback hook posts a minimal summary (no decision extraction — that requires interactive confirmation).
+
 State file shape (`<stateDir>/<session_id>.json`):
 
 ```json
@@ -121,14 +141,32 @@ The marker protocol is frozen across releases. Settings keys may evolve in v0.x 
 ```
 claude-issueops/
 ├── .claude-plugin/
-│   └── plugin.json
+│   └── plugin.json           # plugin manifest
 ├── skills/
 │   └── session-closer/
-│       └── SKILL.md
-├── hooks/
-│   └── hooks.json
-├── bin/                      # helper scripts invoked by hooks
-├── settings.json             # default settings shipped with the plugin
+│       └── SKILL.md          # capture + close orchestration
+├── bin/                      # subprocess entrypoints invoked by hooks and skill
+│   ├── userpromptsubmit_hook.py
+│   ├── precompact_hook.py
+│   ├── sessionend_hook.py
+│   └── session_closer.py     # 8-subcommand JSON dispatcher for the skill
+├── src/issueops/             # pure Python modules (no I/O, callable-injection)
+│   ├── path_utils.py         # session-id validation + atomic-write primitives
+│   ├── state_writer.py       # single window for state-file writes
+│   ├── pending_decisions.py  # gh-failure "save" branch
+│   ├── transcript_reader.py
+│   ├── decision_extractor.py
+│   ├── dedup_checker.py
+│   ├── issue_resolver.py     # branch + status:in-progress → issue number
+│   ├── gh_adapters.py        # subprocess wrappers + failure classification
+│   ├── verification_fixture.py  # AskUserQuestion bypass for L3 verification
+│   ├── session_closer.py     # orchestrator (run_capture / run_close)
+│   ├── marker_parser.py
+│   ├── memory_escalate.py
+│   └── branch_resolver.py
+├── tests/                    # pytest suite (182+ unit tests)
+├── verification-fixtures/    # JSON fixtures for L3 verification recipes
+├── VERIFICATION.md           # V-1〜V-15 Bash verification recipes
 ├── README.md
 ├── CONTRIBUTING.md
 ├── CHANGELOG.md

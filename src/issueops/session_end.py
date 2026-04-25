@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from issueops.state_save import state_file_path
+from issueops.state_writer import merge_update_state
 
 PostCommentFn = Callable[[int, str], None]
 
@@ -90,9 +91,23 @@ def run_session_end(
     assert state is not None  # narrowed by should_post_summary
 
     issue_number = state["pending_restore"]["issue_number"]
-    body = render_summary(state, ended_at=ended_at or datetime.now(timezone.utc))
+    summary_at = ended_at or datetime.now(timezone.utc)
+    body = render_summary(state, ended_at=summary_at)
     try:
         post_comment_fn(issue_number, body)
     except Exception:
         return None
+    # Record the post in the shared state file (atomic) so the
+    # session-closer skill / future SessionEnd invocations can detect
+    # that a fallback summary has already been posted for this session.
+    # Best-effort: failures here must not mask a successful post.
+    try:
+        merge_update_state(
+            project_dir=project_dir,
+            session_id=session_id,
+            patch={"last_summary_at": summary_at.isoformat()},
+            now=summary_at,
+        )
+    except Exception:
+        pass
     return issue_number

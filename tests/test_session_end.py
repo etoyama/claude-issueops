@@ -150,3 +150,43 @@ def test_run_session_end_handles_corrupt_state_file(tmp_path: Path):
     )
     assert result is None
     assert posted == []
+
+
+def test_session_end_refactor_io_equivalence(tmp_path: Path):
+    """T-133: after a successful fallback post, the state file must
+    contain ``last_summary_at`` written via state_writer, while every
+    pre-existing sibling field (session_id, pending_restore, …) is
+    preserved byte-for-byte. The atomic-write contract requires no
+    leftover ``*.tmp.*`` files in the directory.
+
+    Snapshot is inline so the contract is visible without an external
+    fixture file.
+    """
+    state_path = _write_state(tmp_path, _state())
+    fixed = datetime(2026, 4, 25, 14, 30, 0, tzinfo=timezone.utc)
+
+    posted: list = []
+    result = run_session_end(
+        project_dir=tmp_path,
+        session_id="sess-1",
+        post_comment_fn=lambda n, b: posted.append((n, b)),
+        ended_at=fixed,
+    )
+
+    assert result == 10
+    assert len(posted) == 1
+
+    data = json.loads(state_path.read_text())
+
+    # last_summary_at is the ISO-8601 of the post timestamp.
+    assert data["last_summary_at"] == "2026-04-25T14:30:00+00:00"
+
+    # Pre-existing fields are intact (atomic merge, not overwrite).
+    assert data["session_id"] == "sess-1"
+    assert data["pending_restore"] == _state()["pending_restore"]
+
+    # Atomic-write contract: no leftover tmp files in the dir.
+    leftover = [
+        p.name for p in (tmp_path / "session-state").iterdir() if ".tmp." in p.name
+    ]
+    assert leftover == []

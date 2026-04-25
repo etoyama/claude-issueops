@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "scenario": "V-2",
+  "description": "gh auth failure: approve all, then choose 'save' for the 3-choice fallback",
+  "responses": [
+    {
+      "question_id": "approve-decisions",
+      "selections": [
+        "use-bin-adapter",
+        "decision-marker-protocol"
+      ]
+    },
+    {
+      "question_id": "scope:use-bin-adapter",
+      "selections": ["issue"]
+    },
+    {
+      "question_id": "scope:decision-marker-protocol",
+      "selections": ["issue"]
+    },
+    {
+      "question_id": "post-failure-action",
+      "selections": ["save"]
+    }
+  ]
+}

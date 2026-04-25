@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "scenario": "V-13b",
+  "description": "gh failure 3-choice: 'abort' branch — no pending file, no offset advance, only skill_ran_at",
+  "responses": [
+    {
+      "question_id": "approve-decisions",
+      "selections": ["use-bin-adapter"]
+    },
+    {
+      "question_id": "scope:use-bin-adapter",
+      "selections": ["issue"]
+    },
+    {
+      "question_id": "post-failure-action",
+      "selections": ["abort"]
+    }
+  ]
+}

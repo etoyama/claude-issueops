@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "scenario": "V-1",
+  "description": "capture happy path: approve all candidates, all with scope=issue",
+  "responses": [
+    {
+      "question_id": "approve-decisions",
+      "selections": [
+        "use-bin-adapter",
+        "decision-marker-protocol",
+        "atomic-state-write"
+      ]
+    },
+    {
+      "question_id": "scope:use-bin-adapter",
+      "selections": ["issue"]
+    },
+    {
+      "question_id": "scope:decision-marker-protocol",
+      "selections": ["issue"]
+    },
+    {
+      "question_id": "scope:atomic-state-write",
+      "selections": ["issue"]
+    }
+  ]
+}

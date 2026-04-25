@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "scenario": "V-10",
+  "description": "state file corrupt + concurrent race: skill must quarantine the broken file and atomically merge with PreCompact's pending_restore",
+  "responses": [
+    {
+      "question_id": "approve-decisions",
+      "selections": ["use-bin-adapter"]
+    },
+    {
+      "question_id": "scope:use-bin-adapter",
+      "selections": ["issue"]
+    }
+  ]
+}

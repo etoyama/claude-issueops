@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "scenario": "V-7",
+  "description": "scope override: LLM hints cross-issue, user overrides to issue (memory file must NOT be created)",
+  "responses": [
+    {
+      "question_id": "approve-decisions",
+      "selections": ["atomic-state-write"]
+    },
+    {
+      "question_id": "scope:atomic-state-write",
+      "selections": ["issue"]
+    }
+  ]
+}

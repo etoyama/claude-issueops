@@ -12,10 +12,25 @@ fetching its data via ``gh``.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Re-export path helpers from ``path_utils`` so existing imports such as
+# ``from issueops.state_save import state_file_path`` keep working while
+# the new ``state_writer`` module shares the same low-level primitives
+# (avoids an import cycle: state_save -> state_writer -> state_save).
+from issueops.path_utils import _validate_session_id, state_file_path
+from issueops.state_writer import merge_update_state
+
+__all__ = [
+    "STATE_SCHEMA_VERSION",
+    "IssueSnapshot",
+    "_validate_session_id",
+    "state_file_path",
+    "build_pending_restore",
+    "save_pending_restore",
+]
 
 STATE_SCHEMA_VERSION = 1
 
@@ -29,23 +44,6 @@ class IssueSnapshot:
     body_excerpt: str
     decision_slugs: tuple[str, ...]
     parent_epic: int | None
-
-
-def _validate_session_id(session_id: str) -> None:
-    if "/" in session_id or "\\" in session_id or ".." in session_id:
-        raise ValueError(f"unsafe session_id: {session_id!r}")
-    if not session_id:
-        raise ValueError("session_id must not be empty")
-
-
-def state_file_path(project_dir: Path, session_id: str) -> Path:
-    """Return the canonical state-file path for ``session_id``.
-
-    Refuses session IDs that contain path separators or ``..`` so a
-    malicious or malformed value cannot escape ``session-state/``.
-    """
-    _validate_session_id(session_id)
-    return project_dir / "session-state" / f"{session_id}.json"
 
 
 def build_pending_restore(
@@ -86,21 +84,15 @@ def save_pending_restore(
     avoid creating an empty state file so SessionEnd's "skill ran in
     this session?" check is not muddied.
     """
-    target = state_file_path(project_dir, session_id)
+    # Validate session_id eagerly even when snapshot is None so callers
+    # always see a clear error for unsafe IDs (existing test contract).
+    state_file_path(project_dir, session_id)
     if snapshot is None:
         return None
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    existing: dict = {}
-    if target.exists():
-        try:
-            existing = json.loads(target.read_text())
-        except json.JSONDecodeError:
-            existing = {}
-        if not isinstance(existing, dict):
-            existing = {}
-
-    existing["session_id"] = session_id
-    existing["pending_restore"] = build_pending_restore(snapshot, now=now)
-    target.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
-    return target
+    return merge_update_state(
+        project_dir=project_dir,
+        session_id=session_id,
+        patch={"pending_restore": build_pending_restore(snapshot, now=now)},
+        now=now,
+    )

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "scenario": "V-8",
+  "description": "Tier 2 dedup: approve all on first run; second run with captured_slugs cleared must dedup against existing Issue comments",
+  "responses": [
+    {
+      "question_id": "approve-decisions",
+      "selections": [
+        "use-bin-adapter",
+        "decision-marker-protocol"
+      ]
+    },
+    {
+      "question_id": "scope:use-bin-adapter",
+      "selections": ["issue"]
+    },
+    {
+      "question_id": "scope:decision-marker-protocol",
+      "selections": ["issue"]
+    }
+  ]
+}
