@@ -89,3 +89,66 @@ def test_classify_gh_failure_auth_hint() -> None:
 
     unknown = classify_gh_failure("???", 7)
     assert unknown.hint is None
+
+
+# ---------------------------------------------------------------------------
+# #32: stderr redaction (Authorization / token / bearer + truncation)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_gh_failure_redacts_authorization_header() -> None:
+    """An ``Authorization:`` line in stderr must not survive into GhFailure.stderr.
+
+    gh / its underlying HTTP client occasionally surfaces request headers
+    on verbose-error paths. Storing them raw lets the bin response
+    (and any logs the skill writes) republish credentials.
+    """
+    raw = (
+        "HTTP 401: Bad credentials\n"
+        "Authorization: Bearer ghp_supersecret_tokenvalue123\n"
+        "request id: abc123"
+    )
+    failure = classify_gh_failure(raw, 1)
+
+    # Classification still works — uses raw text for matching, not the
+    # stored field — so AUTH wins.
+    assert failure.kind == GhFailureKind.AUTH
+    # The sensitive line is gone.
+    assert "ghp_supersecret_tokenvalue123" not in failure.stderr
+    assert "Authorization:" not in failure.stderr
+    # Replaced with the placeholder rather than silently dropped.
+    assert "[redacted]" in failure.stderr
+    # Surrounding context is preserved.
+    assert "Bad credentials" in failure.stderr
+    assert "request id" in failure.stderr
+
+
+def test_classify_gh_failure_redacts_bearer_and_token_query() -> None:
+    """``bearer <…>`` and ``token=<…>`` patterns are also stripped."""
+    bearer = classify_gh_failure("warning: bearer ghs_xxx will expire", 1)
+    assert "ghs_xxx" not in bearer.stderr
+    assert "[redacted]" in bearer.stderr
+
+    token_query = classify_gh_failure("called https://api.github.com/x?token=abc&y=1", 1)
+    assert "abc" not in token_query.stderr
+    assert "[redacted]" in token_query.stderr
+
+
+def test_classify_gh_failure_truncates_long_stderr() -> None:
+    """Very long stderr is truncated so the JSON response stays bounded."""
+    # 500-char benign stderr (no sensitive patterns).
+    long_text = "x" * 500
+    failure = classify_gh_failure(long_text, 1)
+
+    assert failure.kind == GhFailureKind.UNKNOWN
+    assert len(failure.stderr) <= 200
+    # Truncation marker present so consumers can tell it was trimmed.
+    assert failure.stderr.endswith("...")
+
+
+def test_classify_gh_failure_passes_through_benign_stderr_unchanged() -> None:
+    """Short, non-sensitive stderr round-trips verbatim (no over-redaction)."""
+    raw = "Could not resolve host: api.github.com"
+    failure = classify_gh_failure(raw, 1)
+    assert failure.kind == GhFailureKind.NETWORK
+    assert failure.stderr == raw

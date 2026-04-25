@@ -108,6 +108,40 @@ _NETWORK_PATTERNS = (
 
 _AUTH_HINT = "gh auth status を実行してください"
 
+# stderr redaction (#32): gh stderr can leak Authorization headers, token
+# fragments, or bearer tokens when the underlying HTTP client logs them.
+# We strip those lines before storing into GhFailure so the bin response
+# (which is JSON-serialised back to the skill / user log) cannot republish
+# secrets. Pattern + truncation chosen to keep the failure kind detectable.
+_SENSITIVE_LINE_PATTERNS = (
+    re.compile(r"Authorization\s*:", re.IGNORECASE),
+    re.compile(r"\btoken\s*=", re.IGNORECASE),
+    re.compile(r"\bbearer\s", re.IGNORECASE),
+)
+_STDERR_MAX_CHARS = 200
+_REDACTED_PLACEHOLDER = "[redacted]"
+
+
+def _redact_stderr(text: str) -> str:
+    """Return ``text`` with sensitive lines replaced and length capped.
+
+    Each line is checked against :data:`_SENSITIVE_LINE_PATTERNS`; matches
+    are replaced wholesale with ``[redacted]``. The result is then
+    truncated to :data:`_STDERR_MAX_CHARS` characters so a verbose stderr
+    cannot bloat the JSON response.
+    """
+
+    if not text:
+        return ""
+    redacted_lines = [
+        _REDACTED_PLACEHOLDER if any(p.search(line) for p in _SENSITIVE_LINE_PATTERNS) else line
+        for line in text.splitlines()
+    ]
+    redacted = "\n".join(redacted_lines)
+    if len(redacted) > _STDERR_MAX_CHARS:
+        redacted = redacted[: _STDERR_MAX_CHARS - 3] + "..."
+    return redacted
+
 
 def classify_gh_failure(stderr: str, exit_code: int) -> GhFailure:
     """Classify a ``gh`` failure by inspecting stderr (case-insensitive).
@@ -115,13 +149,18 @@ def classify_gh_failure(stderr: str, exit_code: int) -> GhFailure:
     Order of checks matters when a stderr fragment could match multiple
     patterns: AUTH wins over rate-limit and network because mis-routing
     an auth failure into "retry later" wastes the user's time.
+
+    The classification reads the *raw* stderr but the returned
+    :class:`GhFailure` carries a redacted/truncated copy so downstream
+    JSON serialisation cannot leak secrets (#32).
     """
     text = stderr or ""
+    safe_stderr = _redact_stderr(text)
 
     if any(p.search(text) for p in _AUTH_PATTERNS):
         return GhFailure(
             kind=GhFailureKind.AUTH,
-            stderr=stderr,
+            stderr=safe_stderr,
             exit_code=exit_code,
             hint=_AUTH_HINT,
         )
@@ -129,7 +168,7 @@ def classify_gh_failure(stderr: str, exit_code: int) -> GhFailure:
     if any(p.search(text) for p in _RATE_LIMIT_PATTERNS):
         return GhFailure(
             kind=GhFailureKind.RATE_LIMIT,
-            stderr=stderr,
+            stderr=safe_stderr,
             exit_code=exit_code,
             hint=None,
         )
@@ -137,14 +176,14 @@ def classify_gh_failure(stderr: str, exit_code: int) -> GhFailure:
     if any(p.search(text) for p in _NETWORK_PATTERNS):
         return GhFailure(
             kind=GhFailureKind.NETWORK,
-            stderr=stderr,
+            stderr=safe_stderr,
             exit_code=exit_code,
             hint=None,
         )
 
     return GhFailure(
         kind=GhFailureKind.UNKNOWN,
-        stderr=stderr,
+        stderr=safe_stderr,
         exit_code=exit_code,
         hint=None,
     )
