@@ -22,12 +22,9 @@ Every state-writing test annotates which row of the design.md
 from __future__ import annotations
 
 import json
-import os
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch as mock_patch
 
 import pytest
 
@@ -611,8 +608,9 @@ def test_run_close_summary_when_decisions_posted(
 
     assert result.summary_posted is True
     # Last call to gh_post should be the summary body containing the marker.
-    last = gh_post.calls[-1]  # type: ignore[attr-defined]
-    body = last[1]
+    # calls is list[(args, kwargs)] — body is positional arg index 1.
+    last_args, _last_kwargs = gh_post.calls[-1]  # type: ignore[attr-defined]
+    body = last_args[1]
     assert "session-closer:summary:sess-112" in body
 
 
@@ -1413,10 +1411,10 @@ def test_pending_decisions_issue_number_mismatch_defensive(
     pending = project_dir / "session-state" / "sess-135.pending-decisions.json"
     data = json.loads(pending.read_text())
     assert len(data["entries"]) == 2
-    assert any(
-        "issue_number" in w.lower() or "issue" in w.lower()
-        for w in result.warnings
-    )
+    # T-135: pin to the exact warning the implementation emits, so the
+    # assertion does not silently pass when the warning is reworded or
+    # an unrelated warning containing "issue" leaks in (#31).
+    assert any("issue_number mismatch" in w for w in result.warnings)
 
 
 def test_run_capture_post_without_commit_keeps_state(
@@ -1481,3 +1479,236 @@ def test_run_capture_post_without_commit_keeps_state(
     siblings = list((project_dir / "session-state").iterdir())
     tmps = [p for p in siblings if ".tmp." in p.name]
     assert tmps == []
+
+
+# ---------------------------------------------------------------------------
+# #31: targeted coverage for previously-untested branches in session_closer.py
+# ---------------------------------------------------------------------------
+
+
+def test_run_capture_existing_state_file_is_json_list_falls_back_to_empty(
+    project_dir: Path, gh_post_fn_factory, freeze_now
+):
+    """Cover ``_read_existing_captured_slugs`` when state file's JSON
+    root is a list (not a dict). Should silently degrade to ``[]`` so the
+    new run can still capture without crashing on malformed prior state.
+    """
+    from issueops.path_utils import state_file_path
+    from issueops.session_closer import CaptureRequest, run_capture
+
+    fixed = freeze_now()
+    state_file_path(project_dir, "sess-cov-418").write_text(
+        "[1, 2, 3]", encoding="utf-8"
+    )
+
+    gh_post = gh_post_fn_factory(results=[_ok_post("alpha")])
+    req = CaptureRequest(
+        project_dir=project_dir,
+        session_id="sess-cov-418",
+        issue_number=42,
+        user_decisions=[_make_user_decision("alpha")],
+        transcript_end_offset=10,
+        extracted_candidate_count=1,
+        gh_post_fn=gh_post,
+        commit_state_fn=_wrap_commit(project_dir),
+        now=fixed,
+    )
+    result = run_capture(req)
+
+    # The new slug is captured; the malformed prior is treated as no
+    # prior (the list root contributes nothing).
+    assert result.posted_slugs == ["alpha"]
+    state = _read_state(project_dir, "sess-cov-418")
+    assert state["captured_slugs"] == ["alpha"]
+
+
+def test_run_capture_swallows_prior_pending_parse_error(
+    project_dir: Path, gh_post_fn_factory, freeze_now
+):
+    """Cover the prior-pending read ``except Exception`` path: a malformed
+    pending file must not crash the pre-read (``prior_issue`` defensively
+    becomes ``None``).
+
+    Note that ``append_pending_decisions`` itself does NOT tolerate the
+    same malformed file (by design — it refuses to silently overwrite the
+    user's only record of unposted decisions). So the call still raises,
+    but the exception originates from the writer, not from the pre-read.
+    What we're locking in here is: the pre-read catches its own parse
+    error, no ``issue_number mismatch`` warning is emitted (prior_issue
+    is None, not a stale int), and the failure surfaces as a writer
+    error rather than as a swallowed corruption.
+    """
+    from issueops.pending_decisions import pending_path
+    from issueops.session_closer import CaptureRequest, run_capture
+
+    fixed = freeze_now()
+    pending_path(project_dir, "sess-cov-500").write_text(
+        "{not valid json", encoding="utf-8"
+    )
+
+    gh_post = gh_post_fn_factory(results=[_fail_post(GhFailureKind.NETWORK)])
+    req = CaptureRequest(
+        project_dir=project_dir,
+        session_id="sess-cov-500",
+        issue_number=42,
+        user_decisions=[_make_user_decision("a")],
+        transcript_end_offset=10,
+        extracted_candidate_count=1,
+        gh_post_fn=gh_post,
+        commit_state_fn=_wrap_commit(project_dir),
+        failure_choice="save",
+        now=fixed,
+    )
+    with pytest.raises(ValueError, match="pending file is not valid JSON"):
+        run_capture(req)
+
+
+def test_run_close_summary_view_failed_when_gh_view_raises(
+    project_dir: Path, gh_post_fn_factory, gh_view_comments_fn_factory, freeze_now
+):
+    """Cover the ``view-failed`` summary branch: gh_view_comments raises
+    a GhFailure → summary post is *skipped* (we cannot prove idempotency).
+    """
+    from issueops.session_closer import CloseRequest, run_close
+
+    fixed = freeze_now()
+    gh_post = gh_post_fn_factory(results=[_ok_post("a")])
+    gh_view = gh_view_comments_fn_factory(
+        results=[GhFailure(kind=GhFailureKind.NETWORK, stderr="net", exit_code=1)]
+    )
+
+    req = CloseRequest(
+        project_dir=project_dir,
+        session_id="sess-cov-589",
+        issue_number=42,
+        user_decisions=[_make_user_decision("a")],
+        transcript_end_offset=10,
+        extracted_candidate_count=1,
+        gh_post_fn=gh_post,
+        gh_view_comments_fn=gh_view,
+        commit_state_fn=_wrap_commit(project_dir),
+        memory_dir=project_dir / "memory",
+        now=fixed,
+    )
+    result = run_close(req)
+
+    assert result.summary_posted is False
+    assert result.summary_skipped_reason == "view-failed"
+    # Decision post happened, but no second call for the summary.
+    assert len(gh_post.calls) == 1  # type: ignore[attr-defined]
+
+
+def test_run_close_summary_post_failed_returns_reason(
+    project_dir: Path, gh_post_fn_factory, gh_view_comments_fn_factory, freeze_now
+):
+    """Cover the ``post-failed`` summary branch: decision posts succeed
+    but the subsequent summary post fails. The summary skipped-reason
+    must surface so SKILL.md can warn the user.
+    """
+    from issueops.session_closer import CloseRequest, run_close
+
+    fixed = freeze_now()
+    gh_post = gh_post_fn_factory(
+        results=[_ok_post("a"), _fail_post(GhFailureKind.NETWORK)]
+    )
+    gh_view = gh_view_comments_fn_factory(results=[[]])
+
+    req = CloseRequest(
+        project_dir=project_dir,
+        session_id="sess-cov-601",
+        issue_number=42,
+        user_decisions=[_make_user_decision("a")],
+        transcript_end_offset=10,
+        extracted_candidate_count=1,
+        gh_post_fn=gh_post,
+        gh_view_comments_fn=gh_view,
+        commit_state_fn=_wrap_commit(project_dir),
+        memory_dir=project_dir / "memory",
+        now=fixed,
+    )
+    result = run_close(req)
+
+    assert result.summary_posted is False
+    assert result.summary_skipped_reason == "post-failed"
+
+
+def test_run_close_memory_index_failure_emits_warning(
+    project_dir: Path, gh_post_fn_factory, gh_view_comments_fn_factory, freeze_now
+):
+    """Cover the index-failure branch in ``_escalate_cross_issue``: the
+    write succeeds but the index update raises → warning, no crash, the
+    slug is not counted as escalated.
+    """
+    from issueops.session_closer import CloseRequest, run_close
+
+    fixed = freeze_now()
+    gh_post = gh_post_fn_factory(
+        results=[_ok_post("global"), _ok_post("summary")]
+    )
+    gh_view = gh_view_comments_fn_factory(results=[[]])
+    memory_dir = project_dir / "memory"
+
+    def write_ok(_decision, _mdir):
+        return None
+
+    def index_boom(_mdir, _decision):
+        raise RuntimeError("index boom")
+
+    req = CloseRequest(
+        project_dir=project_dir,
+        session_id="sess-cov-634",
+        issue_number=42,
+        user_decisions=[_make_user_decision("global", final_scope="cross-issue")],
+        transcript_end_offset=10,
+        extracted_candidate_count=1,
+        gh_post_fn=gh_post,
+        gh_view_comments_fn=gh_view,
+        commit_state_fn=_wrap_commit(project_dir),
+        memory_dir=memory_dir,
+        write_memory_fn=write_ok,
+        update_index_fn=index_boom,
+        now=fixed,
+    )
+    result = run_close(req)
+
+    assert result.escalated_slugs == []
+    assert any("memory index update failed" in w for w in result.warnings)
+
+
+def test_run_close_short_circuits_when_capture_aborted(
+    project_dir: Path, gh_post_fn_factory, gh_view_comments_fn_factory, freeze_now
+):
+    """Cover the ``capture.aborted`` short-circuit in run_close: when the
+    capture flow aborts (e.g. transcript_missing), run_close must not
+    attempt summary or escalation, and ``summary_skipped_reason`` is
+    pinned to ``aborted``.
+    """
+    from issueops.session_closer import CloseRequest, run_close
+
+    fixed = freeze_now()
+    gh_post = gh_post_fn_factory(results=[])
+    gh_view = gh_view_comments_fn_factory(results=[])
+
+    req = CloseRequest(
+        project_dir=project_dir,
+        session_id="sess-cov-669",
+        issue_number=42,
+        user_decisions=[_make_user_decision("a")],
+        transcript_end_offset=0,
+        extracted_candidate_count=1,
+        gh_post_fn=gh_post,
+        gh_view_comments_fn=gh_view,
+        commit_state_fn=_wrap_commit(project_dir),
+        memory_dir=project_dir / "memory",
+        transcript_missing=True,
+        now=fixed,
+    )
+    result = run_close(req)
+
+    assert result.capture.aborted is True
+    assert result.summary_posted is False
+    assert result.summary_skipped_reason == "aborted"
+    assert result.escalated_slugs == []
+    # Neither post nor view was called — short-circuit honoured.
+    assert gh_post.calls == []  # type: ignore[attr-defined]
+    assert gh_view.calls == []  # type: ignore[attr-defined]
