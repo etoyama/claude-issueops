@@ -116,26 +116,16 @@ def test_dispatch_rejects_unknown_subcommand(bin_mod):
     assert "no-such-cmd" in response["error"]["message"]
 
 
-def test_dispatch_rejects_non_object_payload(bin_mod):
-    response = bin_mod._dispatch(
-        {
-            "schema_version": bin_mod.SCHEMA_VERSION,
-            "subcommand": "summary",
-            "payload": "not-a-dict",
-        }
-    )
-    assert response["ok"] is False
-    assert response["error"]["kind"] == "internal"
-
-
 def test_dispatch_translates_keyerror_to_internal(bin_mod):
     """A handler missing a required field should surface as ``internal``
     (not as an unhandled ``KeyError`` that strands the skill)."""
+    # Flat envelope: subcommand-specific fields sit alongside
+    # schema_version/subcommand. ``commit-state`` requires session_id
+    # and patch — omitting both should produce an ``internal`` error.
     response = bin_mod._dispatch(
         {
             "schema_version": bin_mod.SCHEMA_VERSION,
             "subcommand": "commit-state",
-            "payload": {},  # missing session_id
         }
     )
     assert response["ok"] is False
@@ -171,7 +161,8 @@ def test_handle_read_transcript_missing_routes_to_transcript_missing(
         {
             "schema_version": bin_mod.SCHEMA_VERSION,
             "subcommand": "read-transcript",
-            "payload": {"transcript_path": str(bogus), "offset": 0},
+            "transcript_path": str(bogus),
+            "offset": 0,
         }
     )
 
@@ -479,20 +470,45 @@ def test_main_returns_internal_error_on_non_object_stdin(
     assert response["ok"] is False
 
 
+def test_dispatch_accepts_flat_envelope_per_design_contract(
+    tmp_path: Path, bin_mod
+):
+    """#30, M-4: round-trip a flat envelope shaped exactly as the
+    SKILL.md ``read-transcript`` example. Pinning this verbatim shape
+    catches drift between SKILL.md, design.md and the dispatcher.
+    """
+    transcript = tmp_path / "session.transcript"
+    transcript.write_text("hello\nworld\n", encoding="utf-8")
+
+    envelope = {
+        "schema_version": bin_mod.SCHEMA_VERSION,
+        "subcommand": "read-transcript",
+        "session_id": "sess-contract",
+        "project_dir": str(tmp_path),
+        "transcript_path": str(transcript),
+        "offset": 0,
+    }
+    response = bin_mod._dispatch(envelope)
+
+    assert response["ok"] is True
+    assert response["result"]["end_offset"] == transcript.stat().st_size
+    assert "hello" in response["result"]["content"]
+
+
 def test_main_dispatches_valid_envelope(
     tmp_path: Path,
     bin_mod,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ):
+    # Flat envelope per design.md "Skill ↔ bin Contract": fields sit
+    # alongside schema_version/subcommand, no payload wrapper.
     envelope = {
         "schema_version": bin_mod.SCHEMA_VERSION,
         "subcommand": "commit-state",
-        "payload": {
-            "session_id": "sess-bin-main",
-            "patch": {"skill_ran_at": "2026-04-25T12:00:00+00:00"},
-            "project_dir": str(tmp_path),
-        },
+        "session_id": "sess-bin-main",
+        "patch": {"skill_ran_at": "2026-04-25T12:00:00+00:00"},
+        "project_dir": str(tmp_path),
     }
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(envelope)))
     rc = bin_mod.main()

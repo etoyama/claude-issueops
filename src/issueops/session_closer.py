@@ -47,6 +47,7 @@ from typing import Any, Literal
 from issueops.decision_extractor import (
     UserDecision,
     candidate_to_decision,
+    render_decision_body,
 )
 from issueops.gh_adapters import GhFailure, GhFailureKind, PostResult
 from issueops.marker_parser import Decision
@@ -54,7 +55,12 @@ from issueops.memory_escalate import (
     update_memory_index,
     write_memory_file,
 )
-from issueops.pending_decisions import append_pending_decisions
+from issueops.pending_decisions import (
+    append_pending_decisions,
+    pending_path,
+    read_pending_issue_number,
+)
+from issueops.state_writer import read_state
 
 __all__ = [
     "CaptureRequest",
@@ -141,6 +147,9 @@ class CaptureRequest:
     issue_resolution_failed: bool = False
     existing_remote_decisions: tuple[Decision, ...] = ()
     tier2_skipped_kind: GhFailureKind | None = None
+    # DI for the prior-state read (#30, M-3). Default is the real
+    # filesystem reader; tests / hosts can swap it for a stub.
+    read_state_fn: Callable[[Path, str], dict] = field(default=read_state)
     now: datetime | None = None
 
 
@@ -170,6 +179,7 @@ class CloseRequest:
     tier2_skipped_kind: GhFailureKind | None = None
     write_memory_fn: Callable[[Decision, Path], Any] = write_memory_file
     update_index_fn: Callable[[Path, Decision], Any] = update_memory_index
+    read_state_fn: Callable[[Path, str], dict] = field(default=read_state)
     now: datetime | None = None
 
 
@@ -258,7 +268,12 @@ def _now(now: datetime | None) -> datetime:
 # ---------------------------------------------------------------------------
 
 
-def _empty_result(*, aborted: bool = False, warnings: list[str] | None = None) -> CaptureResult:
+def _empty_result(
+    *,
+    aborted: bool = False,
+    warnings: list[str] | None = None,
+    state_path: Path | None = None,
+) -> CaptureResult:
     return CaptureResult(
         posted_slugs=[],
         failed_slugs=[],
@@ -269,10 +284,55 @@ def _empty_result(*, aborted: bool = False, warnings: list[str] | None = None) -
         gh_failure_kind=None,
         gh_hint=None,
         pending_path=None,
-        state_path=None,
+        state_path=state_path,
         aborted=aborted,
         warnings=list(warnings or []),
     )
+
+
+def _commit_skill_ran_at_only(
+    req: CaptureRequest, skill_ran_at: str, now: datetime
+) -> Path:
+    """Row-8 commit: only the timestamp lands in the state file."""
+    return req.commit_state_fn(
+        session_id=req.session_id,
+        patch={"skill_ran_at": skill_ran_at},
+        now=now,
+    )
+
+
+def _save_failed_pending(
+    req: CaptureRequest,
+    failed_decisions: list[UserDecision],
+    now: datetime,
+    warnings: list[str],
+) -> Path | None:
+    """Append failed decisions to the pending file (R-9.4) and warn on
+    issue_number drift.
+
+    Pending is the user's only record of unposted decisions, so we
+    write it BEFORE ``commit_state_fn`` — a state-commit crash still
+    leaves the pending file intact. The pre-read uses the public
+    :func:`pending_decisions.read_pending_issue_number` probe so this
+    function carries no inline JSON parsing or import (#30).
+    """
+    target = pending_path(req.project_dir, req.session_id)
+    prior_issue = read_pending_issue_number(target)
+
+    saved = append_pending_decisions(
+        project_dir=req.project_dir,
+        session_id=req.session_id,
+        issue_number=req.issue_number,
+        decisions=failed_decisions,
+        now=now,
+    )
+
+    if prior_issue is not None and prior_issue != req.issue_number:
+        warnings.append(
+            f"pending file issue_number mismatch: prior {prior_issue}, "
+            f"current {req.issue_number} (entries appended defensively)"
+        )
+    return saved
 
 
 def _filter_remote_dedup(
@@ -296,54 +356,77 @@ def _filter_remote_dedup(
     return kept, skipped
 
 
-def _render_decision_body(ud: UserDecision) -> str:
-    """Render the gh-issue-comment body for a UserDecision.
+@dataclass(frozen=True)
+class FailedPost:
+    """Per-decision post failure carried in :class:`PostBatchResult`.
 
-    Uses :func:`candidate_to_decision` to round-trip through the frozen
-    marker_parser.Decision shape so the marker text is identical to what
-    the marker_parser will see on the next dedup check (R-5.2).
+    ``failure`` is set when the gh wrapper returned a classified
+    :class:`GhFailure`; ``exception_text`` is set when the wrapper
+    *raised* (subprocess crash, OSError). Mutually exclusive in
+    practice, but both being None means the result was simply
+    ``ok=False`` with no carrier — included for completeness.
     """
-    decision = candidate_to_decision(ud.candidate)
-    return (
-        f"<!-- claude-issueops:decision:{decision.slug} -->\n"
-        f"## Decision: {decision.slug}\n"
-        "\n"
-        f"**What:** {decision.what}\n"
-        "\n"
-        f"**Why:** {decision.why}\n"
-        "\n"
-        f"**Alternatives considered:** {decision.alternatives}\n"
-        "\n"
-        f"**Consequences:** {decision.consequences}\n"
-    )
+
+    decision: UserDecision
+    failure: GhFailure | None = None
+    exception_text: str | None = None
 
 
-def _post_decisions(
+@dataclass(frozen=True)
+class PostBatchResult:
+    """Outcome of :func:`post_decisions_batch` (#30, quality cleanup).
+
+    Replaces a 4-tuple. ``last_failure_kind`` / ``last_failure_hint``
+    surface the most-recent classified failure so SKILL.md's 3-choice
+    dialog can show one consolidated reason.
+    """
+
+    posted: list[UserDecision]
+    failed: list[FailedPost]
+    last_failure_kind: GhFailureKind | None = None
+    last_failure_hint: str | None = None
+
+
+def post_decisions_batch(
     issue_number: int,
     decisions: list[UserDecision],
     gh_post_fn: Callable[..., PostResult],
-) -> tuple[list[UserDecision], list[UserDecision], GhFailureKind | None, str | None]:
+) -> PostBatchResult:
     """Post each decision serially; collect successes/failures.
 
-    Returns ``(posted, failed, last_failure_kind, last_failure_hint)``.
-    Per R-9 a single failure must not abort the loop; the orchestrator
-    aggregates and lets SKILL.md decide via the 3-choice dialog.
+    Per R-9 a single failure must not abort the loop. We catch
+    ``Exception`` from ``gh_post_fn`` defensively (a raised subprocess
+    error must not strand the rest of the batch) — the bin wrapper
+    used to do this in its own copy of the loop, but consolidating
+    here means callers cannot forget (#30, M-2).
     """
     posted: list[UserDecision] = []
-    failed: list[UserDecision] = []
+    failed: list[FailedPost] = []
     last_kind: GhFailureKind | None = None
     last_hint: str | None = None
     for ud in decisions:
-        body = _render_decision_body(ud)
-        result = gh_post_fn(issue_number, body)
+        body = render_decision_body(ud)
+        try:
+            result = gh_post_fn(issue_number, body)
+        except Exception as exc:  # noqa: BLE001 — R-9 graceful degrade
+            failed.append(
+                FailedPost(decision=ud, exception_text=f"{type(exc).__name__}: {exc}")
+            )
+            continue
         if result is not None and result.ok:
             posted.append(ud)
-        else:
-            failed.append(ud)
-            if result is not None and result.failure is not None:
-                last_kind = result.failure.kind
-                last_hint = result.failure.hint
-    return posted, failed, last_kind, last_hint
+            continue
+        failure = result.failure if result is not None else None
+        failed.append(FailedPost(decision=ud, failure=failure))
+        if failure is not None:
+            last_kind = failure.kind
+            last_hint = failure.hint
+    return PostBatchResult(
+        posted=posted,
+        failed=failed,
+        last_failure_kind=last_kind,
+        last_failure_hint=last_hint,
+    )
 
 
 def _build_capture_state_patch(
@@ -396,44 +479,77 @@ def _build_capture_state_patch(
     return patch
 
 
-def _read_existing_captured_slugs(project_dir: Path, session_id: str) -> list[str]:
-    """Read ``state.captured_slugs`` if the file exists and is parseable.
+def _captured_slugs_from_state(state: dict) -> list[str]:
+    """Extract ``captured_slugs`` from a state dict, defaulting to ``[]``.
 
-    Used so the new run *appends* to (rather than replaces) prior slugs.
-    Corrupt JSON yields ``[]`` and is left for ``commit_state_fn``
-    (state_writer) to quarantine on its own write path.
+    Pure helper. The dict comes from ``read_state_fn`` (DI) so the
+    orchestrator no longer touches the filesystem directly (#30, M-3).
+    Non-list values and non-string entries are dropped silently.
     """
-    import json
-
-    from issueops.path_utils import state_file_path
-
-    target = state_file_path(project_dir, session_id)
-    if not target.exists():
-        return []
-    try:
-        data = json.loads(target.read_text())
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(data, dict):
-        return []
-    slugs = data.get("captured_slugs")
+    slugs = state.get("captured_slugs") if state else None
     if not isinstance(slugs, list):
         return []
     return [s for s in slugs if isinstance(s, str)]
 
 
-def run_capture(req: CaptureRequest) -> CaptureResult:
-    """Execute the capture flow per R-1 and the State Writes Table.
-
-    See module docstring for the architectural rules. Returns a
-    :class:`CaptureResult` describing what landed where; raises only
-    when ``commit_state_fn`` itself raises (T-107 / T-136).
-    """
+def _preflight_warnings(req: CaptureRequest) -> list[str]:
+    """Initial warnings from cross-cutting state (Tier 2 dedup skipped)."""
     warnings: list[str] = []
     if req.tier2_skipped_kind is not None:
         warnings.append(
             f"tier2 dedup skipped due to gh failure: {req.tier2_skipped_kind.value}"
         )
+    return warnings
+
+
+def _compose_capture_result(
+    *,
+    posted: list[UserDecision],
+    failed_decisions: list[UserDecision],
+    batch: PostBatchResult,
+    pending_path_value: Path | None,
+    state_path: Path,
+    warnings: list[str],
+) -> CaptureResult:
+    """Assemble the :class:`CaptureResult` DTO from the run's pieces.
+
+    Centralises the slug/summary projection so adding a new field on
+    CaptureResult does not require touching the orchestrator's main
+    sequence (#30).
+    """
+    return CaptureResult(
+        posted_slugs=[ud.candidate.slug for ud in posted],
+        failed_slugs=[ud.candidate.slug for ud in failed_decisions],
+        posted_decisions=list(posted),
+        failed_decisions=list(failed_decisions),
+        posted_slug_summaries=[_slug_summary(ud) for ud in posted],
+        failed_slug_summaries=[_slug_summary(ud) for ud in failed_decisions],
+        gh_failure_kind=batch.last_failure_kind,
+        gh_hint=batch.last_failure_hint,
+        pending_path=pending_path_value,
+        state_path=state_path,
+        aborted=False,
+        warnings=warnings,
+    )
+
+
+def run_capture(req: CaptureRequest) -> CaptureResult:
+    """Execute the capture flow per R-1 and the State Writes Table.
+
+    Sequence (each step delegated to a named helper):
+
+    1. Collect preflight warnings (Tier 2 dedup skip surfaced from SKILL).
+    2. Short-circuit when transcript is missing (Row 7) or issue
+       resolution failed (Row 8).
+    3. Defense-in-depth remote dedup, then post each approved decision.
+    4. On failures with ``failure_choice='save'``, append to the pending
+       file (with issue_number drift warning).
+    5. Build the state patch from the State Writes Table and commit.
+    6. Compose the result DTO.
+
+    Raises only when ``commit_state_fn`` itself raises (T-107 / T-136).
+    """
+    warnings = _preflight_warnings(req)
 
     # Row 7: transcript missing → no state write at all.
     if req.transcript_missing:
@@ -444,81 +560,35 @@ def run_capture(req: CaptureRequest) -> CaptureResult:
 
     # Row 8: issue resolution failed → skill_ran_at only.
     if req.issue_resolution_failed:
-        path = req.commit_state_fn(
-            session_id=req.session_id,
-            patch={"skill_ran_at": skill_ran_at},
-            now=now,
-        )
-        return CaptureResult(
-            posted_slugs=[],
-            failed_slugs=[],
-            posted_decisions=[],
-            failed_decisions=[],
-            posted_slug_summaries=[],
-            failed_slug_summaries=[],
-            gh_failure_kind=None,
-            gh_hint=None,
-            pending_path=None,
-            state_path=path,
+        return _empty_result(
             aborted=True,
             warnings=warnings,
+            state_path=_commit_skill_ran_at_only(req, skill_ran_at, now),
         )
 
-    # Defense-in-depth remote dedup (T-120). SKILL.md should already
-    # have filtered via filter-dedup, but a race between filter-dedup
-    # and post-decisions could let a duplicate through.
+    # Defense-in-depth remote dedup (T-120). SKILL.md should already have
+    # filtered via filter-dedup, but a race between filter-dedup and
+    # post-decisions could let a duplicate through.
     decisions_to_post, _skipped_remote = _filter_remote_dedup(
         req.user_decisions, req.existing_remote_decisions
     )
 
-    # Post all approved decisions, aggregating failures.
-    posted, failed, gh_failure_kind, gh_hint = _post_decisions(
-        req.issue_number, decisions_to_post, req.gh_post_fn
+    batch = post_decisions_batch(req.issue_number, decisions_to_post, req.gh_post_fn)
+    posted = batch.posted
+    failed_decisions = [fp.decision for fp in batch.failed]
+
+    # R-9.4 — write pending BEFORE commit so a state-commit crash still
+    # leaves the user's only record of unposted decisions intact.
+    pending_path_value: Path | None = None
+    if failed_decisions and req.failure_choice == "save":
+        pending_path_value = _save_failed_pending(req, failed_decisions, now, warnings)
+
+    existing_captured = _captured_slugs_from_state(
+        req.read_state_fn(req.project_dir, req.session_id)
     )
-
-    # Save pending if requested (R-9.4). Pending is the user's
-    # only record of unposted decisions, so we write it BEFORE
-    # commit_state_fn so a state-commit crash still leaves the
-    # pending file intact.
-    pending_path: Path | None = None
-    if failed and req.failure_choice == "save":
-        # T-135: read the pre-existing pending file's issue_number BEFORE
-        # appending, so we can defensively warn when the new request's
-        # issue diverges from what the file already records (a session
-        # is expected to target a single issue, but we tolerate the mismatch).
-        from issueops.pending_decisions import pending_path as _pending_path
-
-        prior_target = _pending_path(req.project_dir, req.session_id)
-        prior_issue: int | None = None
-        if prior_target.exists():
-            try:
-                import json as _json
-
-                prior = _json.loads(prior_target.read_text())
-                if isinstance(prior, dict):
-                    prior_issue = prior.get("issue_number")
-            except Exception:
-                prior_issue = None
-
-        pending_path = append_pending_decisions(
-            project_dir=req.project_dir,
-            session_id=req.session_id,
-            issue_number=req.issue_number,
-            decisions=failed,
-            now=now,
-        )
-
-        if prior_issue is not None and prior_issue != req.issue_number:
-            warnings.append(
-                f"pending file issue_number mismatch: prior {prior_issue}, "
-                f"current {req.issue_number} (entries appended defensively)"
-            )
-
-    existing_captured = _read_existing_captured_slugs(req.project_dir, req.session_id)
-
     patch = _build_capture_state_patch(
         posted=posted,
-        failed=failed,
+        failed=failed_decisions,
         extracted_candidate_count=req.extracted_candidate_count,
         user_decision_count=len(req.user_decisions),
         transcript_end_offset=req.transcript_end_offset,
@@ -527,28 +597,21 @@ def run_capture(req: CaptureRequest) -> CaptureResult:
         existing_captured_slugs=existing_captured,
     )
 
-    # Subcommand-separation guarantee: gh_post has *already* run.
-    # ``commit_state_fn`` is the only state mutation; if it raises we
-    # propagate so SKILL.md can route the error, while the gh side
-    # remains visible on the issue (T-136).
+    # Subcommand-separation guarantee: gh_post has *already* run. If
+    # commit_state_fn raises we propagate so SKILL.md can route the
+    # error, while the gh side remains visible on the issue (T-136).
     state_path = req.commit_state_fn(
         session_id=req.session_id,
         patch=patch,
         now=now,
     )
 
-    return CaptureResult(
-        posted_slugs=[ud.candidate.slug for ud in posted],
-        failed_slugs=[ud.candidate.slug for ud in failed],
-        posted_decisions=list(posted),
-        failed_decisions=list(failed),
-        posted_slug_summaries=[_slug_summary(ud) for ud in posted],
-        failed_slug_summaries=[_slug_summary(ud) for ud in failed],
-        gh_failure_kind=gh_failure_kind,
-        gh_hint=gh_hint,
-        pending_path=pending_path,
+    return _compose_capture_result(
+        posted=posted,
+        failed_decisions=failed_decisions,
+        batch=batch,
+        pending_path_value=pending_path_value,
         state_path=state_path,
-        aborted=False,
         warnings=warnings,
     )
 
@@ -659,6 +722,7 @@ def run_close(req: CloseRequest) -> CloseResult:
         issue_resolution_failed=req.issue_resolution_failed,
         existing_remote_decisions=req.existing_remote_decisions,
         tier2_skipped_kind=req.tier2_skipped_kind,
+        read_state_fn=req.read_state_fn,
         now=req.now,
     )
     capture = run_capture(capture_req)

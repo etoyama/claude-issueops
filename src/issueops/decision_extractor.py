@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal, get_args
 
-from issueops.marker_parser import Decision
+from issueops.marker_parser import DECISION_MARKER_PREFIX, Decision
 
 # Reuse marker_parser's slug shape exactly. Keeping the regex local (not
 # importing the private compiled regex from marker_parser) so this file
@@ -122,6 +122,29 @@ def candidate_to_decision(candidate: Candidate) -> Decision:
         why=candidate.why,
         alternatives=candidate.alternatives,
         consequences=candidate.consequences,
+    )
+
+
+def render_decision_body(user_decision: UserDecision) -> str:
+    """Render the gh-issue-comment body for a UserDecision.
+
+    Single source of truth for the marker text — both the orchestrator
+    (``session_closer._post_decisions``) and the bin adapter use this
+    so a copy-edit in one place cannot drift the marker the next dedup
+    pass will see (#30, M-1).
+    """
+    decision = candidate_to_decision(user_decision.candidate)
+    return (
+        f"{DECISION_MARKER_PREFIX}{decision.slug} -->\n"
+        f"## Decision: {decision.slug}\n"
+        "\n"
+        f"**What:** {decision.what}\n"
+        "\n"
+        f"**Why:** {decision.why}\n"
+        "\n"
+        f"**Alternatives considered:** {decision.alternatives}\n"
+        "\n"
+        f"**Consequences:** {decision.consequences}\n"
     )
 
 

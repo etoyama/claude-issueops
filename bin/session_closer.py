@@ -6,11 +6,18 @@ subcommands and writes a single JSON response to stdout. The contract
 is documented in ``.spec-workflow/specs/session-closer/design.md``
 under "Skill ↔ bin Contract".
 
+Envelope shape is **flat** (#30, M-4): ``schema_version`` and
+``subcommand`` sit alongside the subcommand-specific fields. Handlers
+receive the entire envelope and read only the fields they need — no
+``payload`` wrapper. SKILL.md's example envelopes match this exactly.
+
 Architectural rules (do **not** add logic here):
 
 1. **Logic-free dispatch** — every subcommand handler is a thin
-   ``parse payload → call pure module → wrap result`` translator. All
-   non-trivial behaviour lives in ``src/issueops/*.py``.
+   ``parse envelope → call pure module → wrap result`` translator. All
+   non-trivial behaviour lives in ``src/issueops/*.py`` (#30, M-2 in
+   particular consolidates the post-decisions loop into
+   ``session_closer.post_decisions_batch``).
 2. **No subprocess of our own** — the wrappers in ``gh_adapters`` own
    every shell-out, with ``shell=True`` forbidden.
 3. **Always exit 0** — success and failure both produce a valid JSON
@@ -18,8 +25,8 @@ Architectural rules (do **not** add logic here):
    surfaces ``ok: false`` errors back to the user. An exit ≠ 0 would
    make the skill see truncated output and lose the structured error.
 4. **Schema check first** — ``schema_version`` and ``subcommand`` are
-   validated before any payload-specific parsing so a stale skill
-   client gets a clean ``internal`` error.
+   validated before any field-specific parsing so a stale skill client
+   gets a clean ``internal`` error.
 
 Subcommand handlers (one per row of the design.md subcommand table):
 
@@ -49,6 +56,7 @@ from issueops.decision_extractor import (  # noqa: E402
     Candidate,
     UserDecision,
     candidate_to_decision,
+    render_decision_body,
 )
 from issueops.dedup_checker import filter_local, filter_remote  # noqa: E402
 from issueops.gh_adapters import (  # noqa: E402
@@ -71,6 +79,7 @@ from issueops.pending_decisions import append_pending_decisions  # noqa: E402
 from issueops.session_closer import (  # noqa: E402
     build_summary_marker,
     is_summary_already_posted,
+    post_decisions_batch,
 )
 from issueops.state_writer import merge_update_state  # noqa: E402
 from issueops.transcript_reader import read_transcript_since  # noqa: E402
@@ -252,77 +261,47 @@ def _handle_post_decisions(payload: dict[str, Any]) -> dict[str, Any]:
     """Post each decision; collect successes and per-decision failures.
 
     Maps to ``post-decisions`` (R-1.3, R-9.1, R-9.2). State is *not*
-    touched here — that is the ``commit-state`` subcommand's job. A
-    single failed post does not abort the loop (R-9 graceful
-    degradation); SKILL.md gets the partial-success summary and runs
-    the 3-choice dialog.
+    touched here — that is the ``commit-state`` subcommand's job.
+
+    Logic-free dispatch (#30, M-2): the loop, exception handling, and
+    last-failure tracking all live in
+    ``session_closer._post_decisions``. This handler only translates
+    the JSON wire shape, wires the gh adapter with the right ``cwd``,
+    and serialises the resulting :class:`PostBatchResult` back to JSON.
     """
     issue_number = int(payload["issue_number"])
     cwd = _project_dir(payload)
     raw_decisions = payload.get("decisions") or []
     decisions = [_user_decision_from_dict(d) for d in raw_decisions]
 
-    posted: list[str] = []
-    failed: list[dict[str, Any]] = []
-    last_kind: GhFailureKind | None = None
-    last_hint: str | None = None
+    def _post(issue: int, body: str) -> PostResult:
+        return gh_post_comment(issue, body, cwd=cwd)
 
-    for ud in decisions:
-        body = _render_decision_body(ud)
-        try:
-            result = gh_post_comment(issue_number, body, cwd=cwd)
-        except Exception as exc:  # noqa: BLE001 — never abort the loop
-            failed.append(
-                {"slug": ud.candidate.slug, "error": f"{type(exc).__name__}: {exc}"}
-            )
-            continue
-        if result.ok:
-            posted.append(ud.candidate.slug)
+    batch = post_decisions_batch(issue_number, decisions, _post)
+
+    failed_payload: list[dict[str, Any]] = []
+    for fp in batch.failed:
+        entry: dict[str, Any] = {"slug": fp.decision.candidate.slug}
+        if fp.failure is not None:
+            entry["error"] = fp.failure.stderr
+            entry["kind"] = fp.failure.kind.value
+            if fp.failure.hint:
+                entry["hint"] = fp.failure.hint
+        elif fp.exception_text is not None:
+            entry["error"] = fp.exception_text
         else:
-            kind: str | None = None
-            hint: str | None = None
-            if result.failure is not None:
-                kind = result.failure.kind.value
-                hint = result.failure.hint
-                last_kind = result.failure.kind
-                last_hint = result.failure.hint
-            entry: dict[str, Any] = {
-                "slug": ud.candidate.slug,
-                "error": (result.failure.stderr if result.failure else ""),
-            }
-            if kind:
-                entry["kind"] = kind
-            if hint:
-                entry["hint"] = hint
-            failed.append(entry)
+            entry["error"] = ""
+        failed_payload.append(entry)
 
-    out: dict[str, Any] = {"posted": posted, "failed": failed}
-    if last_kind is not None:
-        out["gh_failure_kind"] = last_kind.value
-    if last_hint is not None:
-        out["gh_hint"] = last_hint
+    out: dict[str, Any] = {
+        "posted": [ud.candidate.slug for ud in batch.posted],
+        "failed": failed_payload,
+    }
+    if batch.last_failure_kind is not None:
+        out["gh_failure_kind"] = batch.last_failure_kind.value
+    if batch.last_failure_hint is not None:
+        out["gh_hint"] = batch.last_failure_hint
     return _ok(out)
-
-
-def _render_decision_body(ud: UserDecision) -> str:
-    """Render a UserDecision as the gh-issue-comment body.
-
-    Identical layout to ``session_closer._render_decision_body`` so
-    Tier 2 dedup picks up the same marker text on the next run.
-    """
-    decision = candidate_to_decision(ud.candidate)
-    return (
-        f"<!-- claude-issueops:decision:{decision.slug} -->\n"
-        f"## Decision: {decision.slug}\n"
-        "\n"
-        f"**What:** {decision.what}\n"
-        "\n"
-        f"**Why:** {decision.why}\n"
-        "\n"
-        f"**Alternatives considered:** {decision.alternatives}\n"
-        "\n"
-        f"**Consequences:** {decision.consequences}\n"
-    )
 
 
 def _handle_commit_state(payload: dict[str, Any]) -> dict[str, Any]:
@@ -472,6 +451,12 @@ _HANDLERS = {
 def _dispatch(envelope: dict[str, Any]) -> dict[str, Any]:
     """Route to the right handler after validating the envelope.
 
+    Envelope shape (per design.md "Skill ↔ bin Contract") is **flat** —
+    ``schema_version`` and ``subcommand`` sit alongside the
+    subcommand-specific fields, with no ``payload`` wrapper. The
+    handler receives the entire envelope and reads only the fields it
+    needs (#30, M-4).
+
     Validation order matters: schema_version is checked before
     subcommand so a stale skill client always gets the same error
     regardless of which subcommand it tried to call.
@@ -487,13 +472,9 @@ def _dispatch(envelope: dict[str, Any]) -> dict[str, Any]:
     if subcommand not in _VALID_SUBCOMMANDS:
         return _err("internal", f"unknown subcommand: {subcommand!r}")
 
-    payload = envelope.get("payload") or {}
-    if not isinstance(payload, dict):
-        return _err("internal", "payload must be a JSON object")
-
     handler = _HANDLERS[subcommand]  # type: ignore[index]
     try:
-        return handler(payload)
+        return handler(envelope)
     except FileNotFoundError as exc:
         # read-transcript is the typical caller; map to the design
         # error kind so SKILL.md can route a "transcript missing" UX.

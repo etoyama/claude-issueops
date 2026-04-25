@@ -30,6 +30,13 @@ class Decision:
     consequences: str
 
 
+#: HTML-comment marker prefix that wraps every posted decision. Both
+#: writers (decision_extractor.render_decision_body) and readers (Tier 2
+#: dedup, idempotency checks) reference this single source so the
+#: protocol stays in sync (#30).
+DECISION_MARKER_PREFIX = "<!-- claude-issueops:decision:"
+
+
 _HEADING_RE = re.compile(r"^## Decision: (?P<slug>[a-z0-9-]+)\s*$", re.MULTILINE)
 
 _CODE_BLOCK_RE = re.compile(

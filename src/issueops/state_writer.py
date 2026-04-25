@@ -39,7 +39,30 @@ from issueops.path_utils import (
     state_file_path,
 )
 
-__all__ = ["merge_update_state", "quarantine_corrupt"]
+__all__ = ["merge_update_state", "quarantine_corrupt", "read_state"]
+
+
+def read_state(project_dir: Path, session_id: str) -> dict:
+    """Return the state file content as a dict, or ``{}`` if unreadable.
+
+    Public read counterpart to :func:`merge_update_state`. Used as the
+    default ``read_state_fn`` injected into the orchestrator so tests
+    and the bin adapter can swap it for a stub without touching the
+    filesystem (#30, M-3).
+
+    Behaviour mirrors ``merge_update_state``'s read step: missing file,
+    invalid JSON, or non-object root all degrade silently to ``{}``.
+    The merge writer will quarantine on its next write — this reader
+    is intentionally side-effect-free.
+    """
+    target = state_file_path(project_dir, session_id)
+    if not target.exists():
+        return {}
+    try:
+        data = json.loads(target.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def merge_update_state(
