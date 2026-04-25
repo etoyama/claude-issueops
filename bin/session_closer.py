@@ -214,7 +214,11 @@ def _handle_resolve_issue(payload: dict[str, Any]) -> dict[str, Any]:
         return _err("issue-resolution", str(exc))
 
     if isinstance(result, AmbiguousResolution):
-        return _ok({"ambiguous": True, "candidates": list(result.candidates)})
+        # Spec contract (SKILL.md / design.md / VERIFICATION.md V-9):
+        # ``{ambiguous_candidates: [int, ...]}`` — single field carries
+        # both the "ambiguous" signal and the candidate list. Earlier
+        # split-field shape was bin-internal drift (#29).
+        return _ok({"ambiguous_candidates": list(result.candidates)})
     return _ok({"issue_number": int(result)})
 
 

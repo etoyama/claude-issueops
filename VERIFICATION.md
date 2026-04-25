@@ -348,7 +348,8 @@ export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v10-state-corr
 2. **Race**: Claude が PreCompact bin と session-closer bin を並行起動:
    ```bash
    echo "{\"session_id\":\"$SID\",\"cwd\":\"$PWD\"}" | uv run python bin/precompact_hook.py &
-   echo "{\"schema_version\":1,\"subcommand\":\"commit-state\",\"payload\":{\"project_dir\":\"$PWD\",\"session_id\":\"$SID\",\"patch\":{\"skill_ran_at\":\"2026-04-26T00:00:00+00:00\"}}}" | uv run python bin/session_closer.py &
+   # Flat envelope per design.md "Skill ↔ bin Contract" (no payload wrapper).
+   echo "{\"schema_version\":1,\"subcommand\":\"commit-state\",\"project_dir\":\"$PWD\",\"session_id\":\"$SID\",\"patch\":{\"skill_ran_at\":\"2026-04-26T00:00:00+00:00\"}}" | uv run python bin/session_closer.py &
    wait
    ```
 
