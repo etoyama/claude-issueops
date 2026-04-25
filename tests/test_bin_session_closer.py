@@ -198,8 +198,11 @@ def test_handle_resolve_issue_ambiguous_returns_candidates(
         {"branch": "master", "project_dir": str(tmp_path)}
     )
     assert response["ok"] is True
-    assert response["result"]["ambiguous"] is True
-    assert sorted(response["result"]["candidates"]) == [10, 20]
+    # Spec contract: single ``ambiguous_candidates`` field carries both
+    # the signal and the candidate list (#29).
+    assert sorted(response["result"]["ambiguous_candidates"]) == [10, 20]
+    assert "ambiguous" not in response["result"]
+    assert "candidates" not in response["result"]
 
 
 def test_handle_resolve_issue_returns_error_when_unresolvable(
