@@ -1,0 +1,11 @@
+{
+  "name": "claude-issueops",
+  "description": "Persist session context and decisions across Claude Code sessions via GitHub Issues",
+  "version": "0.1.0",
+  "author": {
+    "name": "etoyama"
+  },
+  "homepage": "https://github.com/etoyama/claude-issueops",
+  "repository": "https://github.com/etoyama/claude-issueops",
+  "license": "MIT"
+}
