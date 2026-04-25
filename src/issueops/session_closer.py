@@ -48,7 +48,7 @@ from issueops.decision_extractor import (
     UserDecision,
     candidate_to_decision,
 )
-from issueops.gh_adapters import GhFailureKind, PostResult
+from issueops.gh_adapters import GhFailure, GhFailureKind, PostResult
 from issueops.marker_parser import Decision
 from issueops.memory_escalate import (
     update_memory_index,
@@ -571,15 +571,23 @@ def _post_summary_if_needed(
     Returns ``(posted, skipped_reason)``. ``skipped_reason`` is one of:
       - ``"no-decisions"``  — total posted in this session is 0.
       - ``"idempotent"``    — same-sid summary marker already on issue.
+      - ``"view-failed"``   — could not fetch comments to verify
+        idempotency; we refuse to post blind so the user does not see a
+        duplicate summary on retry.
+      - ``"post-failed"``   — gh post itself failed (best-effort).
       - ``None``            — we did post the summary.
     """
     if posted_count == 0:
         return False, "no-decisions"
 
+    # Idempotency relies on us being able to *read* prior comments. If
+    # the view call fails, falling back to "post anyway" risks a
+    # duplicate summary the next time the user retries — worse than
+    # skipping. Match the bin adapter's behaviour at lines 362-372.
     try:
         existing = gh_view_comments_fn(issue_number)
-    except Exception:
-        existing = []
+    except (GhFailure, OSError):
+        return False, "view-failed"
 
     if is_summary_already_posted(existing, session_id):
         return False, "idempotent"

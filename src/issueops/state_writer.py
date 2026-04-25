@@ -30,13 +30,14 @@ This module **must not import** :mod:`issueops.state_save`; both share
 from __future__ import annotations
 
 import json
-import os
-import time
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from issueops.path_utils import state_file_path
+from issueops.path_utils import (
+    acquire_file_lock,
+    atomic_write_json,
+    state_file_path,
+)
 
 __all__ = ["merge_update_state", "quarantine_corrupt"]
 
@@ -59,29 +60,39 @@ def merge_update_state(
     preserved. List values inside ``patch`` overwrite their
     counterparts in the existing file — caller is responsible for any
     list-merge logic before calling.
+
+    Concurrency: the read-merge-write critical section runs under
+    :func:`issueops.path_utils.acquire_file_lock` so concurrent writers
+    cannot stomp on each other (``flock`` advisory, POSIX). Without the
+    lock two writers could each read the pre-state, merge their patch,
+    race on ``os.replace``, and silently drop one patch.
+
+    Durability: the underlying write goes through
+    :func:`issueops.path_utils.atomic_write_json` which fsyncs the tmp
+    file and the parent directory before returning.
     """
     target = state_file_path(project_dir, session_id)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    existing: dict = {}
-    if target.exists():
-        try:
-            data = json.loads(target.read_text())
-        except json.JSONDecodeError:
-            quarantine_corrupt(target, now=now)
-            data = {}
-        if isinstance(data, dict):
-            existing = data
+    with acquire_file_lock(target):
+        existing: dict = {}
+        if target.exists():
+            try:
+                data = json.loads(target.read_text())
+            except json.JSONDecodeError:
+                quarantine_corrupt(target, now=now)
+                data = {}
+            if isinstance(data, dict):
+                existing = data
+            else:
+                # Root is not an object (list/string/number). Quarantine
+                # to preserve the unexpected payload — silently treating
+                # it as ``{}`` would clobber the file on the next merge.
+                quarantine_corrupt(target, now=now)
 
-    merged = {**existing, "session_id": session_id, **patch}
-
-    # tmp filename: pid + monotonic_ns + uuid4[:8] — collision-proof for
-    # both concurrent processes and same-process re-entrant calls.
-    suffix = f"{os.getpid()}.{time.monotonic_ns()}.{uuid.uuid4().hex[:8]}"
-    tmp = target.with_name(f"{target.name}.tmp.{suffix}")
-    tmp.write_text(json.dumps(merged, indent=2, ensure_ascii=False))
-    os.replace(tmp, target)
-    return target
+        merged = {**existing, "session_id": session_id, **patch}
+        atomic_write_json(target, merged)
+        return target
 
 
 def quarantine_corrupt(target: Path, *, now: datetime | None = None) -> Path:

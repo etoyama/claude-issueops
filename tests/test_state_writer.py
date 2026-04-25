@@ -48,7 +48,7 @@ def test_state_writer_offset_atomic(project_dir: Path):
         calls.append((str(src), str(dst)))
         real_replace(src, dst)
 
-    with mock_patch("issueops.state_writer.os.replace", side_effect=spy_replace):
+    with mock_patch("issueops.path_utils.os.replace", side_effect=spy_replace):
         target = merge_update_state(
             project_dir=project_dir,
             session_id="sess-61",
@@ -188,7 +188,7 @@ def test_state_writer_tmp_uniqueness(project_dir: Path):
         seen.append(Path(src).name)
         real_replace(src, dst)
 
-    with mock_patch("issueops.state_writer.os.replace", side_effect=spy_replace):
+    with mock_patch("issueops.path_utils.os.replace", side_effect=spy_replace):
         merge_update_state(
             project_dir=project_dir,
             session_id="sess-67",

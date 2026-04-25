@@ -41,14 +41,15 @@ Schema (design.md § Component 7)::
 from __future__ import annotations
 
 import json
-import os
-import time
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from issueops.decision_extractor import UserDecision
-from issueops.path_utils import _validate_session_id
+from issueops.path_utils import (
+    _validate_session_id,
+    acquire_file_lock,
+    atomic_write_json,
+)
 
 __all__ = [
     "PENDING_SCHEMA_VERSION",
@@ -109,51 +110,51 @@ def append_pending_decisions(
     target = pending_path(project_dir, session_id)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    # Read existing envelope (if any).
-    if target.exists():
-        try:
-            existing = json.loads(target.read_text())
-        except json.JSONDecodeError as e:
-            # We don't quarantine the pending file: unlike the state file
-            # this is the user's only record of unposted decisions. Force
-            # the caller to inspect manually.
-            raise ValueError(
-                f"pending file is not valid JSON: {target}"
-            ) from e
-        if not isinstance(existing, dict):
-            raise ValueError(
-                f"pending file root must be a JSON object: {target}"
-            )
-        existing_version = existing.get("schema_version")
-        if existing_version != PENDING_SCHEMA_VERSION:
-            raise ValueError(
-                f"pending file schema_version mismatch: "
-                f"got {existing_version!r}, expected {PENDING_SCHEMA_VERSION}"
-            )
-        entries = list(existing.get("entries") or [])
-    else:
-        entries = []
+    # Read-modify-write inside the file lock so concurrent
+    # ``append_pending_decisions`` calls cannot lose entries.
+    with acquire_file_lock(target):
+        if target.exists():
+            try:
+                existing = json.loads(target.read_text())
+            except json.JSONDecodeError as e:
+                # We don't quarantine the pending file: unlike the state
+                # file this is the user's only record of unposted
+                # decisions. Force the caller to inspect manually.
+                raise ValueError(
+                    f"pending file is not valid JSON: {target}"
+                ) from e
+            if not isinstance(existing, dict):
+                raise ValueError(
+                    f"pending file root must be a JSON object: {target}"
+                )
+            existing_version = existing.get("schema_version")
+            if existing_version != PENDING_SCHEMA_VERSION:
+                raise ValueError(
+                    f"pending file schema_version mismatch: "
+                    f"got {existing_version!r}, expected {PENDING_SCHEMA_VERSION}"
+                )
+            raw_entries = existing.get("entries", [])
+            if not isinstance(raw_entries, list):
+                raise ValueError(
+                    f"pending file 'entries' must be a JSON array: {target}"
+                )
+            entries = list(raw_entries)
+        else:
+            entries = []
 
-    saved_at = (now or datetime.now(timezone.utc)).isoformat()
+        saved_at = (now or datetime.now(timezone.utc)).isoformat()
+        entries.append(
+            {
+                "saved_at": saved_at,
+                "decisions": [_serialize_decision(d) for d in decisions],
+            }
+        )
 
-    new_entry = {
-        "saved_at": saved_at,
-        "decisions": [_serialize_decision(d) for d in decisions],
-    }
-    entries.append(new_entry)
-
-    payload = {
-        "schema_version": PENDING_SCHEMA_VERSION,
-        "session_id": session_id,
-        "issue_number": int(issue_number),
-        "entries": entries,
-    }
-
-    # Atomic write — same pattern as ``state_writer.merge_update_state``:
-    # pid + monotonic_ns + uuid4[:8] tmp suffix, ``os.replace`` for
-    # POSIX/Windows-atomic rename within the same directory.
-    suffix = f"{os.getpid()}.{time.monotonic_ns()}.{uuid.uuid4().hex[:8]}"
-    tmp = target.with_name(f"{target.name}.tmp.{suffix}")
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-    os.replace(tmp, target)
-    return target
+        payload = {
+            "schema_version": PENDING_SCHEMA_VERSION,
+            "session_id": session_id,
+            "issue_number": int(issue_number),
+            "entries": entries,
+        }
+        atomic_write_json(target, payload)
+        return target

@@ -137,8 +137,8 @@ export SID="v4-$(date +%s)"
 ISSUE=$(gh issue create --repo "$REPO" --title "[V-4] verification" --body "verification target" --label status:in-progress --json number -q .number)
 export ISSUE
 export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v4-mixed-scope.json
-# fixture 内で cross-issue scope に確定する slug を $SLUG として export しておく
-export SLUG=$(jq -r '.responses[] | select(.question_id=="scope") | .selections[0]' "$CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE" 2>/dev/null || echo "v4-decision")
+# fixture から cross-issue scope に確定する slug を抽出 (question_id は `scope:<slug>` 形式)
+export SLUG=$(jq -r '[.responses[] | select(.question_id | startswith("scope:")) | select(.selections[0] == "cross-issue") | .question_id | sub("scope:"; "")][0] // "v4-decision"' "$CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE")
 PROJECT_ENCODED=$(echo -n "$CLAUDE_PROJECT_DIR" | tr / -)
 export MEMORY_DIR="$HOME/.claude/projects/$PROJECT_ENCODED/memory"
 ```
@@ -200,7 +200,7 @@ export SID="v6-$(date +%s)"
 ISSUE=$(gh issue create --repo "$REPO" --title "[V-6] verification" --body "verification target" --label status:in-progress --json number -q .number)
 export ISSUE
 export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v6-cross-issue.json
-export SLUG=$(jq -r '.responses[] | select(.question_id=="approve") | .selections[0]' "$CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE" 2>/dev/null || echo "v6-decision")
+export SLUG=$(jq -r '[.responses[] | select(.question_id | startswith("scope:")) | select(.selections[0] == "cross-issue") | .question_id | sub("scope:"; "")][0] // "v6-decision"' "$CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE")
 PROJECT_ENCODED=$(echo -n "$CLAUDE_PROJECT_DIR" | tr / -)
 export MEMORY_DIR="$HOME/.claude/projects/$PROJECT_ENCODED/memory"
 rm -f "$MEMORY_DIR/reference_$SLUG.md"  # 再生成観測のため
@@ -234,7 +234,8 @@ export SID="v7-$(date +%s)"
 ISSUE=$(gh issue create --repo "$REPO" --title "[V-7] verification" --body "verification target" --label status:in-progress --json number -q .number)
 export ISSUE
 export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v7-override-to-issue.json
-export SLUG=$(jq -r '.responses[] | select(.question_id=="approve") | .selections[0]' "$CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE" 2>/dev/null || echo "v7-decision")
+# V-7 は scope override を確認するため、issue に上書きされる slug を取る
+export SLUG=$(jq -r '[.responses[] | select(.question_id | startswith("scope:")) | .question_id | sub("scope:"; "")][0] // "v7-decision"' "$CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE")
 PROJECT_ENCODED=$(echo -n "$CLAUDE_PROJECT_DIR" | tr / -)
 export MEMORY_DIR="$HOME/.claude/projects/$PROJECT_ENCODED/memory"
 rm -f "$MEMORY_DIR/reference_$SLUG.md"
@@ -548,7 +549,7 @@ export SID="v15-$(date +%s)"
 ISSUE=$(gh issue create --repo "$REPO" --title "[V-15] verification" --body "verification target" --label status:in-progress --json number -q .number)
 export ISSUE
 export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v15-mode-switch.json
-export SLUG=$(jq -r '.responses[] | select(.question_id=="approve") | .selections[0]' "$CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE" 2>/dev/null || echo "v15-decision")
+export SLUG=$(jq -r '[.responses[] | select(.question_id | startswith("scope:")) | select(.selections[0] == "cross-issue") | .question_id | sub("scope:"; "")][0] // "v15-decision"' "$CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE")
 PROJECT_ENCODED=$(echo -n "$CLAUDE_PROJECT_DIR" | tr / -)
 export MEMORY_DIR="$HOME/.claude/projects/$PROJECT_ENCODED/memory"
 rm -f "$MEMORY_DIR/reference_$SLUG.md"
