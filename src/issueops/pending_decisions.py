@@ -55,10 +55,33 @@ __all__ = [
     "PENDING_SCHEMA_VERSION",
     "pending_path",
     "append_pending_decisions",
+    "read_pending_issue_number",
 ]
 
 
 PENDING_SCHEMA_VERSION = 1
+
+
+def read_pending_issue_number(path: Path) -> int | None:
+    """Best-effort probe of the ``issue_number`` field on a pending file.
+
+    Used by the orchestrator to detect when a new failure entry is being
+    appended to a file that originally targeted a different issue (T-135
+    "issue_number mismatch" warning). Any read or parse failure returns
+    ``None`` — the writer (:func:`append_pending_decisions`) is the
+    authoritative validator and will raise on the same file if it is
+    truly corrupt (#30).
+    """
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("issue_number")
+    return int(raw) if isinstance(raw, int) else None
 
 
 def pending_path(project_dir: Path, session_id: str) -> Path:

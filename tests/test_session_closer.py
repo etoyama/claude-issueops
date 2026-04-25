@@ -1675,6 +1675,40 @@ def test_run_close_memory_index_failure_emits_warning(
     assert any("memory index update failed" in w for w in result.warnings)
 
 
+def test_post_decisions_batch_swallows_exception_per_decision(
+    gh_post_fn_factory,
+):
+    """#30, M-2: a raised exception from the gh wrapper must not abort
+    the batch — the rest of the decisions still get a chance to post,
+    and the failure surfaces with ``exception_text`` instead of a
+    classified GhFailure.
+    """
+    from issueops.session_closer import post_decisions_batch
+
+    raising = gh_post_fn_factory(
+        results=[
+            _ok_post("a"),
+            RuntimeError("boom"),
+            _ok_post("c"),
+        ]
+    )
+
+    batch = post_decisions_batch(
+        42,
+        [_make_user_decision(s) for s in ("a", "b", "c")],
+        raising,
+    )
+
+    assert [ud.candidate.slug for ud in batch.posted] == ["a", "c"]
+    assert len(batch.failed) == 1
+    failed = batch.failed[0]
+    assert failed.decision.candidate.slug == "b"
+    assert failed.failure is None
+    assert failed.exception_text is not None
+    assert "RuntimeError" in failed.exception_text
+    assert "boom" in failed.exception_text
+
+
 def test_run_close_short_circuits_when_capture_aborted(
     project_dir: Path, gh_post_fn_factory, gh_view_comments_fn_factory, freeze_now
 ):
