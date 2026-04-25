@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# claude-issueops
+# Per-session state files written by hooks and the session-closer skill.
+# Default location is ${claudeProjectDir}/session-state/<session_id>.json.
+session-state/
