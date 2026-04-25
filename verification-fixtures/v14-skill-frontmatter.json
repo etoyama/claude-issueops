@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "scenario": "V-14",
+  "description": "SKILL.md frontmatter validation: no AskUserQuestion is invoked; the verification is purely a frontmatter parse + key-presence check, so this fixture is intentionally empty",
+  "responses": []
+}

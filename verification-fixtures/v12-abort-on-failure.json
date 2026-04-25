@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "scenario": "V-12",
+  "description": "gh auth failure with hint: approve candidate, then choose 'abort' on the 3-choice failure prompt (no save, no discard)",
+  "responses": [
+    {
+      "question_id": "approve-decisions",
+      "selections": ["use-bin-adapter"]
+    },
+    {
+      "question_id": "scope:use-bin-adapter",
+      "selections": ["issue"]
+    },
+    {
+      "question_id": "post-failure-action",
+      "selections": ["abort"]
+    }
+  ]
+}

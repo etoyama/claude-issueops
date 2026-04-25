@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "scenario": "V-13a",
+  "description": "gh failure 3-choice: 'discard' branch — no pending file is created, captured_slugs stays at 0",
+  "responses": [
+    {
+      "question_id": "approve-decisions",
+      "selections": ["use-bin-adapter"]
+    },
+    {
+      "question_id": "scope:use-bin-adapter",
+      "selections": ["issue"]
+    },
+    {
+      "question_id": "post-failure-action",
+      "selections": ["discard"]
+    }
+  ]
+}

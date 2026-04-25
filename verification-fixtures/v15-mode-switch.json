@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "scenario": "V-15",
+  "description": "mode switch (capture vs close): single fixture used for both rounds. Round (a) capture: posts Decision but no summary, no memory file. Round (b) close: posts Decision + summary + memory file (cross-issue)",
+  "responses": [
+    {
+      "question_id": "approve-decisions",
+      "selections": ["atomic-state-write"]
+    },
+    {
+      "question_id": "scope:atomic-state-write",
+      "selections": ["cross-issue"]
+    }
+  ]
+}

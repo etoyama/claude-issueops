@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "scenario": "V-3",
+  "description": "SessionEnd hook skip judgment: capture-mode posts exactly 1 decision so skill_ran_at is set; SessionEnd then must skip its fallback summary",
+  "responses": [
+    {
+      "question_id": "approve-decisions",
+      "selections": ["use-bin-adapter"]
+    },
+    {
+      "question_id": "scope:use-bin-adapter",
+      "selections": ["issue"]
+    }
+  ]
+}

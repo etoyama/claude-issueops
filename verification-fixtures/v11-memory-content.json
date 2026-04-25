@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "scenario": "V-11",
+  "description": "memory file content verification: piggybacks on V-6's run; the memory file content is diffed against render_reference_memory output (no extra UI required)",
+  "responses": [
+    {
+      "question_id": "approve-decisions",
+      "selections": ["atomic-state-write"]
+    },
+    {
+      "question_id": "scope:atomic-state-write",
+      "selections": ["cross-issue"]
+    }
+  ]
+}

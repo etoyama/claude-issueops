@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "scenario": "V-5",
+  "description": "reject all candidates: only skill_ran_at updated, no Decision/summary posted",
+  "responses": [
+    {
+      "question_id": "approve-decisions",
+      "selections": []
+    }
+  ]
+}
