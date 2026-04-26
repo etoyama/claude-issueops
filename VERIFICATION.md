@@ -16,7 +16,24 @@ export CLAUDE_ISSUEOPS_VERIFICATION_MODE=1
 export CLAUDE_PROJECT_DIR="$(pwd)"
 export STATE_DIR="${CLAUDE_PROJECT_DIR}/session-state"
 mkdir -p "$STATE_DIR"
+
+# Preflight: V-X recipes assume `status:in-progress` exists on the
+# repo (Tier 1 issue resolver scans for it). Idempotent.
+gh label list --repo "$REPO" --limit 200 | awk '{print $1}' | grep -qx "status:in-progress" \
+  || gh label create "status:in-progress" --repo "$REPO" --color fbca04 \
+       --description "L3 verification target marker"
+
+# Preflight: GitHub's label-filtered list is eventually consistent
+# (~1-2 s lag). When a recipe creates issues then immediately calls
+# `bin/session_closer.py resolve-issue`, poll for visibility before
+# invoking the bin to avoid spurious FAIL on fresh-issue race.
 ```
+
+### ヘルパー (このリポ同梱)
+
+- `scripts/l3-acceptance.sh bash-only` — Skill 起動が要らない V-X (V-3, V-9 Run 1, V-10 Run 2, V-14) を一気に走らせて PASS/FAIL を出す。test issue は trap で auto-close する
+- `scripts/cleanup-l3-verification-issues.sh` — `[V-` prefix の open issue を一括 close。途中で session が落ちたときの掃除用
+- `tests/fixtures/transcripts/v*-capture.jsonl` — capture モードを駆動するための transcript 雛形 (中身は `v-base-capture.jsonl` の symlink、3 decision を含む)
 
 ---
 
@@ -25,7 +42,7 @@ mkdir -p "$STATE_DIR"
 ### Setup
 ```bash
 export SID="v1-$(date +%s)"
-ISSUE=$(gh issue create --repo "$REPO" --title "[V-1] verification" --body "verification target" --label status:in-progress --json number -q .number)
+ISSUE=$(gh issue create --repo "$REPO" --title "[V-1] verification" --body "verification target" --label status:in-progress | awk -F/ '{print $NF}')
 export ISSUE
 export STATE_FILE="$STATE_DIR/$SID.json"
 
@@ -66,7 +83,7 @@ unset CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE SID ISSUE STATE_FILE N
 ### Setup
 ```bash
 export SID="v2-$(date +%s)"
-ISSUE=$(gh issue create --repo "$REPO" --title "[V-2] verification" --body "verification target" --label status:in-progress --json number -q .number)
+ISSUE=$(gh issue create --repo "$REPO" --title "[V-2] verification" --body "verification target" --label status:in-progress | awk -F/ '{print $NF}')
 export ISSUE
 export STATE_FILE="$STATE_DIR/$SID.json"
 export GITHUB_TOKEN=invalid_token_for_v2
@@ -98,7 +115,7 @@ unset SID ISSUE STATE_FILE
 ### Setup
 ```bash
 export SID="v3-$(date +%s)"
-ISSUE=$(gh issue create --repo "$REPO" --title "[V-3] verification" --body "verification target" --label status:in-progress --json number -q .number)
+ISSUE=$(gh issue create --repo "$REPO" --title "[V-3] verification" --body "verification target" --label status:in-progress | awk -F/ '{print $NF}')
 export ISSUE
 export STATE_FILE="$STATE_DIR/$SID.json"
 export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v3-approve-one.json
@@ -134,7 +151,7 @@ unset SID ISSUE STATE_FILE CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE PRE_COUNT
 ### Setup
 ```bash
 export SID="v4-$(date +%s)"
-ISSUE=$(gh issue create --repo "$REPO" --title "[V-4] verification" --body "verification target" --label status:in-progress --json number -q .number)
+ISSUE=$(gh issue create --repo "$REPO" --title "[V-4] verification" --body "verification target" --label status:in-progress | awk -F/ '{print $NF}')
 export ISSUE
 export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v4-mixed-scope.json
 # fixture から cross-issue scope に確定する slug を抽出 (question_id は `scope:<slug>` 形式)
@@ -166,7 +183,7 @@ unset SID ISSUE SLUG MEMORY_DIR CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE
 ### Setup
 ```bash
 export SID="v5-$(date +%s)"
-ISSUE=$(gh issue create --repo "$REPO" --title "[V-5] verification" --body "verification target" --label status:in-progress --json number -q .number)
+ISSUE=$(gh issue create --repo "$REPO" --title "[V-5] verification" --body "verification target" --label status:in-progress | awk -F/ '{print $NF}')
 export ISSUE
 export STATE_FILE="$STATE_DIR/$SID.json"
 export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v5-reject-all.json
@@ -197,7 +214,7 @@ unset SID ISSUE STATE_FILE PRE_COUNT CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE
 ### Setup
 ```bash
 export SID="v6-$(date +%s)"
-ISSUE=$(gh issue create --repo "$REPO" --title "[V-6] verification" --body "verification target" --label status:in-progress --json number -q .number)
+ISSUE=$(gh issue create --repo "$REPO" --title "[V-6] verification" --body "verification target" --label status:in-progress | awk -F/ '{print $NF}')
 export ISSUE
 export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v6-cross-issue.json
 export SLUG=$(jq -r '[.responses[] | select(.question_id | startswith("scope:")) | select(.selections[0] == "cross-issue") | .question_id | sub("scope:"; "")][0] // "v6-decision"' "$CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE")
@@ -231,7 +248,7 @@ unset SID ISSUE SLUG MEMORY_DIR CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE
 ### Setup
 ```bash
 export SID="v7-$(date +%s)"
-ISSUE=$(gh issue create --repo "$REPO" --title "[V-7] verification" --body "verification target" --label status:in-progress --json number -q .number)
+ISSUE=$(gh issue create --repo "$REPO" --title "[V-7] verification" --body "verification target" --label status:in-progress | awk -F/ '{print $NF}')
 export ISSUE
 export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v7-override-to-issue.json
 # V-7 は scope override を確認するため、issue に上書きされる slug を取る
@@ -263,7 +280,7 @@ unset SID ISSUE SLUG MEMORY_DIR CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE
 ### Setup
 ```bash
 export SID="v8-$(date +%s)"
-ISSUE=$(gh issue create --repo "$REPO" --title "[V-8] verification" --body "verification target" --label status:in-progress --json number -q .number)
+ISSUE=$(gh issue create --repo "$REPO" --title "[V-8] verification" --body "verification target" --label status:in-progress | awk -F/ '{print $NF}')
 export ISSUE
 export STATE_FILE="$STATE_DIR/$SID.json"
 export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v8-approve-all.json
@@ -295,8 +312,8 @@ unset SID ISSUE STATE_FILE CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE
 ### Setup
 ```bash
 export SID="v9-$(date +%s)"
-ISSUE_A=$(gh issue create --repo "$REPO" --title "[V-9-A] verification" --body "candidate A" --label status:in-progress --json number -q .number)
-ISSUE_B=$(gh issue create --repo "$REPO" --title "[V-9-B] verification" --body "candidate B" --label status:in-progress --json number -q .number)
+ISSUE_A=$(gh issue create --repo "$REPO" --title "[V-9-A] verification" --body "candidate A" --label status:in-progress | awk -F/ '{print $NF}')
+ISSUE_B=$(gh issue create --repo "$REPO" --title "[V-9-B] verification" --body "candidate B" --label status:in-progress | awk -F/ '{print $NF}')
 export ISSUE_A ISSUE_B
 export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v9-pick-issue.json
 ```
@@ -338,7 +355,7 @@ unset SID ISSUE_A ISSUE_B CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE
 export SID="v10-$(date +%s)"
 export STATE_FILE="$STATE_DIR/$SID.json"
 echo '{"broken":' > "$STATE_FILE"   # 不正 JSON を意図的に書く
-ISSUE=$(gh issue create --repo "$REPO" --title "[V-10] verification" --body "verification target" --label status:in-progress --json number -q .number)
+ISSUE=$(gh issue create --repo "$REPO" --title "[V-10] verification" --body "verification target" --label status:in-progress | awk -F/ '{print $NF}')
 export ISSUE
 export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v10-state-corrupt.json
 ```
@@ -410,7 +427,7 @@ rm -f /tmp/v11-expected.md
 ### Setup
 ```bash
 export SID="v12-$(date +%s)"
-ISSUE=$(gh issue create --repo "$REPO" --title "[V-12] verification" --body "verification target" --label status:in-progress --json number -q .number)
+ISSUE=$(gh issue create --repo "$REPO" --title "[V-12] verification" --body "verification target" --label status:in-progress | awk -F/ '{print $NF}')
 export ISSUE
 export STATE_FILE="$STATE_DIR/$SID.json"
 export GITHUB_TOKEN=invalid_token_for_v12
@@ -442,8 +459,8 @@ unset SID ISSUE STATE_FILE
 ```bash
 export SID_A="v13a-$(date +%s)"
 export SID_B="v13b-$(date +%s)"
-ISSUE_A=$(gh issue create --repo "$REPO" --title "[V-13-A] discard" --body "discard case" --label status:in-progress --json number -q .number)
-ISSUE_B=$(gh issue create --repo "$REPO" --title "[V-13-B] abort" --body "abort case" --label status:in-progress --json number -q .number)
+ISSUE_A=$(gh issue create --repo "$REPO" --title "[V-13-A] discard" --body "discard case" --label status:in-progress | awk -F/ '{print $NF}')
+ISSUE_B=$(gh issue create --repo "$REPO" --title "[V-13-B] abort" --body "abort case" --label status:in-progress | awk -F/ '{print $NF}')
 export ISSUE_A ISSUE_B
 export GITHUB_TOKEN=invalid_token_for_v13
 ```
@@ -547,7 +564,7 @@ rm -f /tmp/v14-result.txt
 ### Setup
 ```bash
 export SID="v15-$(date +%s)"
-ISSUE=$(gh issue create --repo "$REPO" --title "[V-15] verification" --body "verification target" --label status:in-progress --json number -q .number)
+ISSUE=$(gh issue create --repo "$REPO" --title "[V-15] verification" --body "verification target" --label status:in-progress | awk -F/ '{print $NF}')
 export ISSUE
 export CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE=verification-fixtures/v15-mode-switch.json
 export SLUG=$(jq -r '[.responses[] | select(.question_id | startswith("scope:")) | select(.selections[0] == "cross-issue") | .question_id | sub("scope:"; "")][0] // "v15-decision"' "$CLAUDE_ISSUEOPS_VERIFICATION_FIXTURE")
