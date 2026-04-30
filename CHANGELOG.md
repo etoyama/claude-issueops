@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **`session-closer` skill** (#8) — capture + close modes with two-tier dedup, AskUserQuestion-driven approval, gh-failure 3-choice fallback (save / discard / abort), AmbiguousResolution handling, idempotent summary posting, and memory escalation for `cross-issue` decisions. The skill is split across `skills/session-closer/SKILL.md` (LLM orchestration), `bin/session_closer.py` (8-subcommand JSON dispatcher), and pure modules under `src/issueops/`. End-to-end behaviour is verified by `VERIFICATION.md` recipes V-1〜V-15.
 - **Test design template** (#26) integrated via `.spec-workflow/user-templates/`.
 
+### Documentation
+
+- CONTRIBUTING.md gains a "Merge strategy" section documenting the no-ff merge convention, why squash/rebase are not used, and the `git revert -m 1 <merge-commit>` revert procedure (#19).
+
 ### Notes
 
 - v0.1 is feature-complete; remaining work is L3 acceptance verification and the marketplace listing. Track under [Epic #7](https://github.com/etoyama/claude-issueops/issues/7).
