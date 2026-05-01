@@ -2,7 +2,7 @@
 
 Persist session context and decisions across Claude Code sessions via GitHub Issues.
 
-> Status: pre-release (v0.1 in development — continuity hooks and the `session-closer` skill have landed; marketplace listing pending). Origin: this is the OSS extraction of [insight-blueprint#132](https://github.com/etoyama/insight-blueprint/issues/132).
+> Status: pre-release (v0.1 feature-complete — continuity hooks and the `session-closer` skill have landed; remaining work is L3 acceptance verification and the marketplace listing, tracked under [Epic #7](https://github.com/etoyama/claude-issueops/issues/7)). Origin: this is the OSS extraction of [insight-blueprint#132](https://github.com/etoyama/insight-blueprint/issues/132).
 
 ## What & Why
 
@@ -164,9 +164,13 @@ claude-issueops/
 │   ├── marker_parser.py
 │   ├── memory_escalate.py
 │   └── branch_resolver.py
-├── tests/                    # pytest suite (182+ unit tests)
+├── tests/                    # pytest suite (217 unit tests, ~82% coverage)
+│   └── fixtures/transcripts/ # L3 verification transcripts (LLM-extractable)
 ├── verification-fixtures/    # JSON fixtures for L3 verification recipes
 ├── VERIFICATION.md           # V-1〜V-15 Bash verification recipes
+├── scripts/
+│   ├── l3-acceptance.sh             # bash-only V-X driver (V-3, V-9 Run 1, V-10 Run 2, V-14)
+│   └── cleanup-l3-verification-issues.sh  # sweep [V- prefix open issues
 ├── README.md
 ├── CONTRIBUTING.md
 ├── CHANGELOG.md
