@@ -46,6 +46,26 @@ If you find a case where the protocol does not fit, file an issue with `type:fea
 4. CI must be green. If you have to skip a hook, explain why in the PR description.
 5. Mark the PR ready for review. Reviews focus on the protocol, the public surface, and tests.
 
+## Merge strategy
+
+Every PR is merged with **`--merge` (no-ff merge commit)**. Squash and rebase merges are not used.
+
+```bash
+gh pr merge <n> --merge --delete-branch
+```
+
+The reason is that this project keeps **one commit per issue** and we want the merge commit on `master` to record exactly which issue closed when. Squashing collapses that, and rebasing rewrites the per-issue commit's hash so cross-references break. The merge-commit form preserves the `Refs #N` / `Closes #N` chain that downstream tooling (and `git log --merges`) walks.
+
+If a merged PR needs to be reverted:
+
+```bash
+git revert -m 1 <merge-commit-sha>
+```
+
+`-m 1` keeps the `master` line of history as the parent and reverses the feature branch's diff in a single new commit. Open the revert as its own PR — never push the revert directly to `master`.
+
+Do not enable "Allow squash merging" or "Allow rebase merging" in the GitHub repo settings; the only enabled merge type is the merge commit.
+
 ## Local development
 
 ```bash
