@@ -92,6 +92,8 @@ Three hooks ship in v0.1:
 
 `SessionStart` is intentionally not used: `UserPromptSubmit` runs at the same effective moment for context purposes and is the only hook that supports `additionalContext` injection both at session start and after compaction. A single hook keeps the lifecycle debuggable.
 
+**On `additionalContext` durability** ([Claude Code docs](https://code.claude.com/docs/en/hooks#add-context-for-claude)): the injected briefing is saved to the session transcript and **replayed verbatim** when the session is resumed via `--continue` or `--resume`. The briefing is therefore frozen at the moment it was first injected — the in-progress issues list and prior-decisions excerpt seen on resume are the snapshot from the original session start, not a fresh fetch. This is by design (the briefing is meant to anchor the session, not to track live state); when you want fresh data, end the session and start a new one. The hook's exact position relative to `CLAUDE.md` in the assembled prompt is implementation-detail and not part of the contract — we treat it as "alongside the user prompt" per the documented wording.
+
 ## Skills
 
 ### `session-closer`
