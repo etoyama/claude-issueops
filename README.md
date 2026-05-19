@@ -2,7 +2,9 @@
 
 Persist session context and decisions across Claude Code sessions via GitHub Issues.
 
-> Status: pre-release (v0.1 feature-complete — continuity hooks and the `session-closer` skill have landed; remaining work is L3 acceptance verification and the marketplace listing, tracked under [Epic #7](https://github.com/etoyama/claude-issueops/issues/7)). Origin: this is the OSS extraction of [insight-blueprint#132](https://github.com/etoyama/insight-blueprint/issues/132).
+English | [日本語](./README.ja.md)
+
+> Status: [v0.1.0 released](https://github.com/etoyama/claude-issueops/releases/tag/v0.1.0) — continuity hooks, the `session-closer` skill (capture / close), the decision marker protocol, and cross-issue memory escalation are all on `master`. L3 acceptance verified ([Epic #7](https://github.com/etoyama/claude-issueops/issues/7) closed). A marketplace listing will follow. Origin: this is the OSS extraction of [insight-blueprint#132](https://github.com/etoyama/insight-blueprint/issues/132).
 
 ## What & Why
 
