@@ -120,7 +120,7 @@ transcript ファイルを `offset` 以降のバイト範囲で読み出す。
 
 ### 3. `filter-dedup`
 
-Tier 1 (ローカル `captured_slugs`) と Tier 2 (Issue 既存コメントの marker scan) で候補を除外。Tier 2 の `gh` 失敗時は `tier2_skipped: true` を返し abort しない。
+Tier 1 (ローカル `captured_slugs`) と Tier 2 (Issue 既存コメントの marker scan) で候補を除外。Tier 2 の `gh` 失敗時は `tier2_skipped_kind` (gh 失敗種別の文字列) を返し abort しない。成功時は `tier2_skipped_kind` 自体が出力に含まれない。
 
 ```jsonc
 // in
@@ -133,17 +133,23 @@ Tier 1 (ローカル `captured_slugs`) と Tier 2 (Issue 既存コメントの m
   "candidates": [ /* Candidate[] */ ],
   "captured_slugs": ["already-posted-slug"]
 }
-// out
+// out (Tier 2 成功)
 {
   "schema_version": 1,
   "ok": true,
-  "result": { "filtered_candidates": [ /* ... */ ], "tier2_skipped": false }
+  "result": { "candidates": [ /* ... */ ] }
+}
+// out (Tier 2 が gh 失敗で skip — Tier 1 のみで継続)
+{
+  "schema_version": 1,
+  "ok": true,
+  "result": { "candidates": [ /* ... */ ], "tier2_skipped_kind": "auth" }
 }
 ```
 
 ### 4. `post-decisions`
 
-`UserDecision[]` を `gh issue comment` で投稿。**state は触らない** (commit-state と分離)。部分失敗を許容し `posted_slugs[]` と `failed_slugs[]` を返す。
+`UserDecision[]` を `gh issue comment` で投稿。**state は触らない** (commit-state と分離)。部分失敗を許容し `posted[]` (成功 slug) と `failed[]` (失敗エントリ) を返す。gh 失敗が 1 件でも発生していれば、最後の失敗種別を top-level `gh_failure_kind` (および利用可能なら `gh_hint`) として併記する。
 
 ```jsonc
 // in
@@ -153,22 +159,35 @@ Tier 1 (ローカル `captured_slugs`) と Tier 2 (Issue 既存コメントの m
   "session_id": "abc123",
   "project_dir": "/repo",
   "issue_number": 8,
-  "user_decisions": [
+  "decisions": [
     { "candidate": { /* ... */ }, "final_scope": "issue" }
   ]
 }
-// out
+// out (全成功)
 {
   "schema_version": 1,
   "ok": true,
   "result": {
-    "posted_slugs": ["use-bin-adapter"],
-    "failed_slugs": [
-      { "slug": "isolate-gh", "gh_failure_kind": "auth", "hint": "gh auth status を実行してください" }
-    ]
+    "posted": ["use-bin-adapter"],
+    "failed": []
+  }
+}
+// out (部分失敗)
+{
+  "schema_version": 1,
+  "ok": true,
+  "result": {
+    "posted": ["use-bin-adapter"],
+    "failed": [
+      { "slug": "isolate-gh", "error": "gh: authentication required", "kind": "auth", "hint": "gh auth status を実行してください" }
+    ],
+    "gh_failure_kind": "auth",
+    "gh_hint": "gh auth status を実行してください"
   }
 }
 ```
+
+`failed[]` の各エントリは `slug` (必須) と `error` (失敗メッセージ、必須) を持つ。gh コマンド失敗由来なら `kind` (`auth` / `network` / `rate-limit` / `unknown`) と任意で `hint` も乗る。bin 内部例外なら `kind`/`hint` は省略され `error` のみ。
 
 ### 5. `commit-state`
 
@@ -205,10 +224,14 @@ close モードでのみ呼ぶ。`<!-- claude-issueops:session-closer:summary:<s
   "issue_number": 8,
   "captured_slugs_total": ["use-bin-adapter", "isolate-gh"]
 }
-// out
-{ "schema_version": 1, "ok": true, "result": { "posted_summary": true } }
-// または
-{ "schema_version": 1, "ok": true, "result": { "skipped": "idempotent" } }
+// out (投稿成功)
+{ "schema_version": 1, "ok": true, "result": { "posted": true, "marker": "<!-- claude-issueops:session-closer:summary:abc123 -->", "comment_url": "https://github.com/owner/repo/issues/8#issuecomment-..." } }
+// out (idempotent skip: 同 session の summary が既出)
+{ "schema_version": 1, "ok": true, "result": { "posted": false, "skipped": "idempotent", "marker": "<!-- claude-issueops:session-closer:summary:abc123 -->" } }
+// out (gh view 失敗で重複検査不能 — SKILL.md 側で warnings に変換)
+{ "schema_version": 1, "ok": true, "result": { "posted": false, "skipped": "view-failed", "gh_failure_kind": "auth" } }
+// out (gh post 失敗 — marker は試行済み)
+{ "schema_version": 1, "ok": true, "result": { "posted": false, "skipped": "post-failed", "marker": "<!-- claude-issueops:session-closer:summary:abc123 -->", "gh_failure_kind": "auth", "gh_hint": "gh auth status を実行してください" } }
 ```
 
 ### 7. `escalate`
@@ -223,11 +246,15 @@ close モードでのみ呼ぶ。`<!-- claude-issueops:session-closer:summary:<s
   "session_id": "abc123",
   "project_dir": "/repo",
   "decisions": [ /* PostedDecision[] with final_scope=cross-issue */ ],
-  "memory_dir": "/Users/u/.claude/projects/abc/memory"
+  "project_memory_dir": "/Users/u/.claude/projects/abc/memory"
 }
-// out
-{ "schema_version": 1, "ok": true, "result": { "escalated_paths": ["/Users/u/.claude/projects/abc/memory/reference_use-bin-adapter.md"] } }
+// out (全成功)
+{ "schema_version": 1, "ok": true, "result": { "written": ["use-bin-adapter"] } }
+// out (一部 slug の memory write / index 更新が失敗 — best-effort、コメントはロールバックしない)
+{ "schema_version": 1, "ok": true, "result": { "written": ["use-bin-adapter"], "warnings": ["memory write failed for slug isolate-gh: <reason>"] } }
 ```
+
+`written[]` は memory file と index 更新の **両方** に成功した slug のみ含む。途中で失敗した slug は `warnings[]` に理由を残し、後段の処理を継続する (R-8.4 best-effort)。
 
 ### 8. `save-pending`
 
@@ -271,8 +298,8 @@ state file から `last_processed_offset` (既定 0) を読み、`read-transcrip
 
 `filter-dedup` に `candidates` と `captured_slugs` を渡す。
 
-- `filtered_candidates` が空 → 「新しい決定は検出されませんでした」とユーザーに通知して終了。`commit-state` で `skill_ran_at` のみ patch。
-- `tier2_skipped: true` (gh 失敗) → 警告だけ表示し Tier 1 のみで続行。
+- `candidates` が空 → 「新しい決定は検出されませんでした」とユーザーに通知して終了。`commit-state` で `skill_ran_at` のみ patch。
+- `tier2_skipped_kind` が present (gh 失敗、値は `auth` / `network` / `rate-limit` / `unknown` のいずれか) → 警告だけ表示し Tier 1 のみで続行。
 
 ### Step 5. ユーザー承認 + scope 確定
 
@@ -282,11 +309,11 @@ state file から `last_processed_offset` (既定 0) を読み、`read-transcrip
 
 ### Step 6. Decision を Issue に投稿
 
-`post-decisions` を呼ぶ。返ってきた `posted_slugs[]` と `failed_slugs[]` を保持する。**この時点では state は変わっていない** (post-decisions は state に触らない)。
+`post-decisions` を呼ぶ。返ってきた `posted[]` と `failed[]` を保持する。**この時点では state は変わっていない** (post-decisions は state に触らない)。
 
 ### Step 7. 失敗時の 3 択フォールバック
 
-`failed_slugs` が空でなければ **`AskUserQuestion (single select)`** で `[ローカルに保存して後で再投稿, 破棄, 中断]` の 3 択を提示する。
+`failed` が空でなければ **`AskUserQuestion (single select)`** で `[ローカルに保存して後で再投稿, 破棄, 中断]` の 3 択を提示する。
 
 - **保存**: `save-pending` を呼んで未投稿 Decision を `<sid>.pending-decisions.json` に追記。
 - **破棄**: 何もしない (drop)。
