@@ -1,0 +1,24 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-issueops",
+  "description": "Single-plugin marketplace for claude-issueops",
+  "owner": {
+    "name": "etoyama"
+  },
+  "plugins": [
+    {
+      "name": "claude-issueops",
+      "source": "./",
+      "description": "Persist session context and decisions across Claude Code sessions via GitHub Issues",
+      "version": "0.1.0",
+      "author": {
+        "name": "etoyama"
+      },
+      "homepage": "https://github.com/etoyama/claude-issueops",
+      "repository": "https://github.com/etoyama/claude-issueops",
+      "license": "MIT",
+      "category": "development",
+      "keywords": ["session-management", "decision-capture", "github-issues", "memory"]
+    }
+  ]
+}
