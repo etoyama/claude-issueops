@@ -119,14 +119,29 @@ for compliance with the new session-token storage requirements.
 
 ## インストール
 
+### Claude Code marketplace 経由 (推奨)
+
+```text
+/plugin marketplace add etoyama/claude-issueops
+/plugin install claude-issueops@claude-issueops
+```
+
+(`etoyama/claude-issueops` は GitHub repo の省略表記。SSH 形式 `git@github.com:etoyama/claude-issueops.git` でも可。)
+
+インストール後、skill は plugin 名空間付きで `/claude-issueops:<skill>` の形で呼ぶ。
+
+### 開発用にローカル直読み
+
 ```bash
 git clone https://github.com/etoyama/claude-issueops.git
 claude --plugin-dir ./claude-issueops
 ```
 
-skill は plugin 名空間付きで `/claude-issueops:<skill>` の形で呼ぶ。marketplace 配信は v0.2 以降の予定。
+`--plugin-dir` は marketplace 機構を経由せずに plugin を読む。plugin 本体に変更を加えながら試すときに使う。
 
-前提:
+公式 community marketplace (Anthropic の `claude-plugins-community`) への登録は [#60](https://github.com/etoyama/claude-issueops/issues/60) で別途進行中。
+
+### 前提
 
 - `gh` CLI が認証済 (`gh auth status` が通ること)
 - 作業ブランチが `(?:feat|fix|chore|refactor)/<issue番号>-...` の規約に従っているか、対象 Issue に `status:in-progress` ラベルが付いていること

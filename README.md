@@ -12,16 +12,27 @@ Claude Code sessions lose context at five predictable boundaries: session start,
 
 ## Install
 
-This plugin is in pre-release. To try it locally:
+### Via Claude Code marketplace (recommended)
+
+```text
+/plugin marketplace add etoyama/claude-issueops
+/plugin install claude-issueops@claude-issueops
+```
+
+(`etoyama/claude-issueops` is shorthand for the GitHub repo; the SSH form `git@github.com:etoyama/claude-issueops.git` also works.)
+
+Skills are namespaced under the plugin name, so commands appear as `/claude-issueops:<skill>` once installed.
+
+### Locally for development
 
 ```bash
 git clone https://github.com/etoyama/claude-issueops.git
 claude --plugin-dir ./claude-issueops
 ```
 
-Skills are namespaced under the plugin name, so commands appear as `/claude-issueops:<skill>`.
+`--plugin-dir` loads the plugin without going through the marketplace machinery; useful when iterating on the plugin itself.
 
-A marketplace listing will follow once v0.1 is tagged.
+A community marketplace listing (Anthropic's `claude-plugins-community`) is tracked in [#60](https://github.com/etoyama/claude-issueops/issues/60).
 
 ## Quickstart
 
