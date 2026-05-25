@@ -143,6 +143,87 @@ def test_summary_marker_idempotent():
     assert is_summary_already_posted([], sid) is False
 
 
+# T-32b: build_summary_body — #64 regression fix.
+# captured_slugs_total in the summary payload must be rendered as a
+# Markdown subsection so that the close-mode comment is not "marker + H2
+# header only" (which is what triggered #64 in the etoyama/boatrace-insight
+# dogfooding session). The marker-token contract (used by is_summary_already_posted
+# for idempotency) is preserved verbatim.
+
+
+def test_build_summary_body_empty_slugs_matches_marker_only():
+    """#64: empty / None captured_slugs_total → body == marker token.
+
+    Existing close-mode comments without captured decisions stay
+    byte-for-byte identical (no spurious subsection, no extra newlines).
+    """
+    from issueops.session_closer import build_summary_body, build_summary_marker
+
+    sid = "sess-bsb-empty"
+    assert build_summary_body(sid, []) == build_summary_marker(sid)
+    assert build_summary_body(sid, None) == build_summary_marker(sid)
+
+
+def test_build_summary_body_single_slug_includes_section_and_count():
+    """#64: single slug → ``### Captured decisions (1)`` + one list item."""
+    from issueops.session_closer import build_summary_body
+
+    body = build_summary_body("sess-bsb-1", ["slug-a"])
+    assert body.startswith(
+        "<!-- claude-issueops:session-closer:summary:sess-bsb-1 -->"
+    )
+    assert "## Session summary" in body
+    assert "### Captured decisions (1)" in body
+    assert "- slug-a" in body
+
+
+def test_build_summary_body_multiple_slugs_preserves_order_and_count():
+    """#64: multiple slugs → count == len(slugs), order preserved.
+
+    Uses multi-character slugs to avoid accidental matches against the
+    ``<!-- c`` substring inside the HTML-comment marker token (a single
+    ``- c`` bullet collides with the marker prefix).
+    """
+    from issueops.session_closer import build_summary_body
+
+    body = build_summary_body("sess-bsb-multi", ["alpha", "beta", "gamma"])
+    assert "### Captured decisions (3)" in body
+    idx_a = body.index("- alpha")
+    idx_b = body.index("- beta")
+    idx_c = body.index("- gamma")
+    assert idx_a < idx_b < idx_c
+
+
+def test_build_summary_body_drops_empty_and_non_string_entries():
+    """#64 defensive: empty strings and non-str entries are dropped before counting.
+
+    Decision marker protocol guarantees slug well-formedness upstream,
+    but the bin handler may receive a noisy ``captured_slugs_total``
+    from SKILL.md (e.g. a stale entry). We refuse to inject empty bullets.
+    """
+    from issueops.session_closer import build_summary_body
+
+    body = build_summary_body(
+        "sess-bsb-drops",
+        ["valid", "", None, 42, "another"],  # type: ignore[list-item]
+    )
+    assert "### Captured decisions (2)" in body
+    assert "- valid" in body
+    assert "- another" in body
+    # No bullet for empty / non-str entries
+    assert "- \n" not in body
+    assert "- 42" not in body
+
+
+def test_build_summary_body_supports_non_ascii_slugs():
+    """Non-ASCII slugs (e.g. Japanese) survive the round trip unmodified."""
+    from issueops.session_closer import build_summary_body
+
+    body = build_summary_body("sess-bsb-uni", ["日本語-slug"])
+    assert "- 日本語-slug" in body
+    assert "### Captured decisions (1)" in body
+
+
 def test_run_capture_partial_success_state(
     project_dir: Path, gh_post_fn_factory, freeze_now
 ):
@@ -612,6 +693,132 @@ def test_run_close_summary_when_decisions_posted(
     last_args, _last_kwargs = gh_post.calls[-1]  # type: ignore[attr-defined]
     body = last_args[1]
     assert "session-closer:summary:sess-112" in body
+
+
+def test_run_close_summary_body_includes_posted_captured_slugs(
+    project_dir: Path, gh_post_fn_factory, gh_view_comments_fn_factory, freeze_now
+):
+    """#64 (orchestrator side): run_close's summary body lists this
+    session's posted slugs as ``### Captured decisions``.
+
+    Same expectation as test_handle_summary_renders_captured_slugs_in_posted_body,
+    but exercised through the higher-level ``run_close`` flow so the
+    orchestrator's captured_slugs_total plumbing is pinned end-to-end.
+    """
+    from issueops.session_closer import CloseRequest, run_close
+
+    fixed = freeze_now()
+    user_decisions = [
+        _make_user_decision("alpha"),
+        _make_user_decision("beta"),
+    ]
+    gh_post = gh_post_fn_factory(
+        results=[_ok_post("alpha"), _ok_post("beta"), _ok_post("summary")]
+    )
+    gh_view = gh_view_comments_fn_factory(results=[[]])
+
+    req = CloseRequest(
+        project_dir=project_dir,
+        session_id="sess-112b",
+        issue_number=42,
+        user_decisions=user_decisions,
+        transcript_end_offset=10,
+        extracted_candidate_count=2,
+        gh_post_fn=gh_post,
+        gh_view_comments_fn=gh_view,
+        commit_state_fn=_wrap_commit(project_dir),
+        memory_dir=project_dir / "memory",
+        now=fixed,
+    )
+    result = run_close(req)
+
+    assert result.summary_posted is True
+    last_args, _kw = gh_post.calls[-1]  # type: ignore[attr-defined]
+    summary_body = last_args[1]
+    assert "### Captured decisions (2)" in summary_body
+    assert "- alpha" in summary_body
+    assert "- beta" in summary_body
+
+
+def test_run_capture_result_carries_captured_slugs_total(
+    project_dir: Path, gh_post_fn_factory, freeze_now
+):
+    """#64: CaptureResult exposes captured_slugs_total (existing state +
+    newly posted, deduplicated, order-preserving) so run_close can pass
+    it to the summary builder without re-reading state.
+    """
+    from issueops.session_closer import CaptureRequest, run_capture
+    from issueops.state_writer import merge_update_state
+
+    fixed = freeze_now()
+    # Seed pre-existing captured_slugs on the state file so the helper
+    # has something to merge against.
+    merge_update_state(
+        project_dir=project_dir,
+        session_id="sess-csl",
+        patch={"captured_slugs": ["prev-x", "prev-y"]},
+    )
+
+    user_decisions = [_make_user_decision("new-z")]
+    gh_post = gh_post_fn_factory(results=[_ok_post("new-z")])
+
+    req = CaptureRequest(
+        project_dir=project_dir,
+        session_id="sess-csl",
+        issue_number=42,
+        user_decisions=user_decisions,
+        transcript_end_offset=10,
+        extracted_candidate_count=1,
+        gh_post_fn=gh_post,
+        commit_state_fn=_wrap_commit(project_dir),
+        now=fixed,
+    )
+    result = run_capture(req)
+
+    assert result.captured_slugs_total == ["prev-x", "prev-y", "new-z"]
+
+
+def test_run_capture_captured_slugs_total_dedup_against_existing(
+    project_dir: Path, gh_post_fn_factory, freeze_now
+):
+    """#64: captured_slugs_total deduplicates against pre-existing slugs.
+
+    Re-posting a slug already recorded in state does not duplicate it
+    in the merged total (matches the patch-side merge in
+    _build_capture_state_patch).
+    """
+    from issueops.session_closer import CaptureRequest, run_capture
+    from issueops.state_writer import merge_update_state
+
+    fixed = freeze_now()
+    merge_update_state(
+        project_dir=project_dir,
+        session_id="sess-csl-dup",
+        patch={"captured_slugs": ["shared"]},
+    )
+
+    user_decisions = [
+        _make_user_decision("shared"),
+        _make_user_decision("fresh"),
+    ]
+    gh_post = gh_post_fn_factory(
+        results=[_ok_post("shared"), _ok_post("fresh")]
+    )
+
+    req = CaptureRequest(
+        project_dir=project_dir,
+        session_id="sess-csl-dup",
+        issue_number=42,
+        user_decisions=user_decisions,
+        transcript_end_offset=10,
+        extracted_candidate_count=2,
+        gh_post_fn=gh_post,
+        commit_state_fn=_wrap_commit(project_dir),
+        now=fixed,
+    )
+    result = run_capture(req)
+
+    assert result.captured_slugs_total == ["shared", "fresh"]
 
 
 def test_run_close_summary_idempotent(

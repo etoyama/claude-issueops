@@ -70,6 +70,7 @@ __all__ = [
     "run_capture",
     "run_close",
     "build_summary_marker",
+    "build_summary_body",
     "is_summary_already_posted",
 ]
 
@@ -189,6 +190,13 @@ class CaptureResult:
 
     The fields are flat-and-explicit so SKILL.md can ``json.dumps`` the
     result for the bin → skill stdout payload directly.
+
+    ``captured_slugs_total`` (added for #64) carries the *merged*
+    list of slugs the issue has accumulated across sessions = the prior
+    state-file ``captured_slugs`` plus this run's freshly posted slugs,
+    deduplicated and order-preserving. ``run_close`` forwards it to the
+    summary-body builder so the close-mode comment lists what the
+    session captured.
     """
 
     posted_slugs: list[str]
@@ -202,6 +210,7 @@ class CaptureResult:
     pending_path: Path | None
     state_path: Path | None
     aborted: bool
+    captured_slugs_total: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -225,17 +234,50 @@ _SUMMARY_MARKER_PREFIX = "<!-- claude-issueops:session-closer:summary:"
 
 
 def build_summary_marker(session_id: str) -> str:
-    """Return the canonical close-mode summary comment body.
+    """Return the canonical close-mode summary marker token.
 
     The marker token embeds ``session_id`` so multiple close calls in
     the same session detect each other (R-2.3 idempotency); cross-session
     summaries on the same issue do *not* collide because each carries its
     own session id.
+
+    This returns just the marker + ``## Session summary`` heading. The
+    full comment body (with optional ``### Captured decisions`` section)
+    is rendered by :func:`build_summary_body`.
     """
     return (
         f"{_SUMMARY_MARKER_PREFIX}{session_id} -->\n"
         "## Session summary\n"
     )
+
+
+def build_summary_body(
+    session_id: str,
+    captured_slugs_total: list[str] | None = None,
+) -> str:
+    """Render the full close-mode summary comment body (#64).
+
+    Composition:
+    - Always starts with :func:`build_summary_marker` output so
+      :func:`is_summary_already_posted` keeps working byte-for-byte.
+    - When ``captured_slugs_total`` is non-empty, appends a
+      ``### Captured decisions (N)`` subsection with one bullet per slug.
+
+    Empty / non-string entries in ``captured_slugs_total`` are dropped
+    before counting — the bin handler may forward a noisy list from
+    SKILL.md and we refuse to inject empty bullets.
+    """
+    marker_token = build_summary_marker(session_id)
+    slugs = [s for s in (captured_slugs_total or []) if isinstance(s, str) and s]
+    if not slugs:
+        return marker_token
+    lines = [
+        marker_token.rstrip("\n"),
+        "",
+        f"### Captured decisions ({len(slugs)})",
+    ]
+    lines.extend(f"- {slug}" for slug in slugs)
+    return "\n".join(lines) + "\n"
 
 
 def is_summary_already_posted(comments: list[Any], session_id: str) -> bool:
@@ -273,6 +315,7 @@ def _empty_result(
     aborted: bool = False,
     warnings: list[str] | None = None,
     state_path: Path | None = None,
+    captured_slugs_total: list[str] | None = None,
 ) -> CaptureResult:
     return CaptureResult(
         posted_slugs=[],
@@ -286,6 +329,7 @@ def _empty_result(
         pending_path=None,
         state_path=state_path,
         aborted=aborted,
+        captured_slugs_total=list(captured_slugs_total or []),
         warnings=list(warnings or []),
     )
 
@@ -429,16 +473,32 @@ def post_decisions_batch(
     )
 
 
+def _compute_captured_slugs_total(
+    existing_captured_slugs: list[str], posted: list[UserDecision]
+) -> list[str]:
+    """Merge prior-state slugs with this run's newly posted slugs (#64).
+
+    Order-preserving and deduplicated: prior slugs first (in their
+    original order), then any newly posted slugs not already in prior.
+    Shared with :func:`_build_capture_state_patch` so the state file
+    ``captured_slugs`` field and :attr:`CaptureResult.captured_slugs_total`
+    never drift.
+    """
+    new_slugs = [ud.candidate.slug for ud in posted]
+    return list(existing_captured_slugs) + [
+        s for s in new_slugs if s not in existing_captured_slugs
+    ]
+
+
 def _build_capture_state_patch(
     *,
-    posted: list[UserDecision],
     failed: list[UserDecision],
     extracted_candidate_count: int,
     user_decision_count: int,
     transcript_end_offset: int,
     failure_choice: FailureChoice,
     skill_ran_at_iso: str,
-    existing_captured_slugs: list[str],
+    merged_slugs: list[str],
 ) -> dict:
     """Compose the ``commit_state_fn`` patch per the State Writes Table.
 
@@ -463,11 +523,7 @@ def _build_capture_state_patch(
         # Row 5: extracted but rejected → no offset, no slugs.
         return patch
 
-    new_slugs = [ud.candidate.slug for ud in posted]
-    merged_slugs = list(existing_captured_slugs) + [
-        s for s in new_slugs if s not in existing_captured_slugs
-    ]
-    patch["captured_slugs"] = merged_slugs
+    patch["captured_slugs"] = list(merged_slugs)
 
     has_failure = bool(failed)
     if has_failure and failure_choice == "abort":
@@ -509,6 +565,7 @@ def _compose_capture_result(
     batch: PostBatchResult,
     pending_path_value: Path | None,
     state_path: Path,
+    captured_slugs_total: list[str],
     warnings: list[str],
 ) -> CaptureResult:
     """Assemble the :class:`CaptureResult` DTO from the run's pieces.
@@ -529,6 +586,7 @@ def _compose_capture_result(
         pending_path=pending_path_value,
         state_path=state_path,
         aborted=False,
+        captured_slugs_total=list(captured_slugs_total),
         warnings=warnings,
     )
 
@@ -586,15 +644,15 @@ def run_capture(req: CaptureRequest) -> CaptureResult:
     existing_captured = _captured_slugs_from_state(
         req.read_state_fn(req.project_dir, req.session_id)
     )
+    merged_slugs = _compute_captured_slugs_total(existing_captured, posted)
     patch = _build_capture_state_patch(
-        posted=posted,
         failed=failed_decisions,
         extracted_candidate_count=req.extracted_candidate_count,
         user_decision_count=len(req.user_decisions),
         transcript_end_offset=req.transcript_end_offset,
         failure_choice=req.failure_choice,
         skill_ran_at_iso=skill_ran_at,
-        existing_captured_slugs=existing_captured,
+        merged_slugs=merged_slugs,
     )
 
     # Subcommand-separation guarantee: gh_post has *already* run. If
@@ -612,6 +670,7 @@ def run_capture(req: CaptureRequest) -> CaptureResult:
         batch=batch,
         pending_path_value=pending_path_value,
         state_path=state_path,
+        captured_slugs_total=merged_slugs,
         warnings=warnings,
     )
 
@@ -626,6 +685,7 @@ def _post_summary_if_needed(
     issue_number: int,
     session_id: str,
     posted_count: int,
+    captured_slugs_total: list[str],
     gh_post_fn: Callable[..., PostResult],
     gh_view_comments_fn: Callable[..., list[dict]],
 ) -> tuple[bool, str | None]:
@@ -639,6 +699,11 @@ def _post_summary_if_needed(
         duplicate summary on retry.
       - ``"post-failed"``   — gh post itself failed (best-effort).
       - ``None``            — we did post the summary.
+
+    ``captured_slugs_total`` is forwarded to :func:`build_summary_body`
+    so the summary comment lists the slugs the issue has accumulated
+    (prior state + this session's posts). Pass ``[]`` for the
+    marker-only shape.
     """
     if posted_count == 0:
         return False, "no-decisions"
@@ -655,7 +720,7 @@ def _post_summary_if_needed(
     if is_summary_already_posted(existing, session_id):
         return False, "idempotent"
 
-    body = build_summary_marker(session_id)
+    body = build_summary_body(session_id, captured_slugs_total)
     result = gh_post_fn(issue_number, body)
     if result is not None and result.ok:
         return True, None
@@ -742,6 +807,7 @@ def run_close(req: CloseRequest) -> CloseResult:
         issue_number=req.issue_number,
         session_id=req.session_id,
         posted_count=len(capture.posted_slugs),
+        captured_slugs_total=capture.captured_slugs_total,
         gh_post_fn=req.gh_post_fn,
         gh_view_comments_fn=req.gh_view_comments_fn,
     )
