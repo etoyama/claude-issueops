@@ -77,6 +77,7 @@ from issueops.marker_parser import Decision, parse_decisions  # noqa: E402
 from issueops.memory_escalate import update_memory_index, write_memory_file  # noqa: E402
 from issueops.pending_decisions import append_pending_decisions  # noqa: E402
 from issueops.session_closer import (  # noqa: E402
+    build_summary_body,
     build_summary_marker,
     is_summary_already_posted,
     post_decisions_batch,
@@ -334,12 +335,22 @@ def _handle_summary(payload: dict[str, Any]) -> dict[str, Any]:
 
     The skill drives idempotency: this handler checks the issue's
     existing comments for the same-session marker and skips when a
-    duplicate is found. ``body`` is optional — when absent the
-    canonical marker template is used.
+    duplicate is found.
+
+    Body composition (#64 fix):
+    - If ``body`` is supplied verbatim in the payload, it wins (escape
+      hatch for SKILL.md to fully control the comment body).
+    - Otherwise, the body is :func:`build_summary_body` applied to
+      ``captured_slugs_total`` — adds a ``### Captured decisions``
+      subsection when slugs are present, falls back to the marker-only
+      shape when not. Non-string / empty slug entries are dropped.
     """
     issue_number = int(payload["issue_number"])
     session_id = str(payload["session_id"])
     cwd = _project_dir(payload)
+
+    raw_slugs = payload.get("captured_slugs_total") or []
+    captured_slugs_total = [s for s in raw_slugs if isinstance(s, str) and s]
 
     try:
         existing = gh_view_comments(issue_number, cwd=cwd)
@@ -358,7 +369,8 @@ def _handle_summary(payload: dict[str, Any]) -> dict[str, Any]:
     if is_summary_already_posted(existing, session_id):
         return _ok({"posted": False, "skipped": "idempotent", "marker": marker_token})
 
-    body = str(payload.get("body") or marker_token)
+    default_body = build_summary_body(session_id, captured_slugs_total)
+    body = str(payload.get("body") or default_body)
     result = gh_post_comment(issue_number, body, cwd=cwd)
     if not result.ok:
         out: dict[str, Any] = {

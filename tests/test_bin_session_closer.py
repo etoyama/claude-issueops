@@ -398,6 +398,105 @@ def test_handle_summary_posts_when_no_existing_marker(
     assert "marker" in response["result"]
 
 
+def test_handle_summary_renders_captured_slugs_in_posted_body(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    """#64: ``captured_slugs_total`` in the payload must be rendered as a
+    ``### Captured decisions`` subsection in the posted body.
+
+    Re-creates the exact repro from the #64 ticket (boatrace-insight
+    dogfooding): three slugs in, body must list them. Prior to the fix,
+    the bin handler ignored ``captured_slugs_total`` and posted only the
+    marker + H2 header.
+    """
+    monkeypatch.setattr(bin_mod, "gh_view_comments", lambda issue, *, cwd: [])
+    posted_bodies: list[str] = []
+
+    def fake_post(issue, body, *, cwd):
+        posted_bodies.append(body)
+        return _ok_post("summary")
+
+    monkeypatch.setattr(bin_mod, "gh_post_comment", fake_post)
+
+    response = bin_mod._handle_summary(
+        {
+            "issue_number": 1,
+            "session_id": "sess-bin-sum-slugs",
+            "project_dir": str(tmp_path),
+            "captured_slugs_total": ["slug-a", "slug-b", "slug-c"],
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["result"]["posted"] is True
+    assert len(posted_bodies) == 1
+    body = posted_bodies[0]
+    assert "### Captured decisions (3)" in body
+    assert "- slug-a" in body
+    assert "- slug-b" in body
+    assert "- slug-c" in body
+
+
+def test_handle_summary_omitting_captured_slugs_posts_marker_only_body(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    """Backward compat: when ``captured_slugs_total`` is absent, the
+    posted body equals the marker token (no spurious subsection).
+    """
+    monkeypatch.setattr(bin_mod, "gh_view_comments", lambda issue, *, cwd: [])
+    posted_bodies: list[str] = []
+
+    def fake_post(issue, body, *, cwd):
+        posted_bodies.append(body)
+        return _ok_post("summary")
+
+    monkeypatch.setattr(bin_mod, "gh_post_comment", fake_post)
+
+    bin_mod._handle_summary(
+        {
+            "issue_number": 1,
+            "session_id": "sess-bin-sum-compat",
+            "project_dir": str(tmp_path),
+        }
+    )
+    assert len(posted_bodies) == 1
+    body = posted_bodies[0]
+    assert "### Captured decisions" not in body
+    assert (
+        "<!-- claude-issueops:session-closer:summary:sess-bin-sum-compat -->"
+        in body
+    )
+
+
+def test_handle_summary_payload_body_overrides_captured_slugs(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    """An explicit ``body`` field in the payload wins over the
+    auto-rendered body so SKILL.md retains the escape hatch for
+    callers that want full control over the comment body.
+    """
+    monkeypatch.setattr(bin_mod, "gh_view_comments", lambda issue, *, cwd: [])
+    posted_bodies: list[str] = []
+
+    def fake_post(issue, body, *, cwd):
+        posted_bodies.append(body)
+        return _ok_post("summary")
+
+    monkeypatch.setattr(bin_mod, "gh_post_comment", fake_post)
+
+    override = "## Custom summary body"
+    bin_mod._handle_summary(
+        {
+            "issue_number": 1,
+            "session_id": "sess-bin-sum-override",
+            "project_dir": str(tmp_path),
+            "captured_slugs_total": ["should-not-appear"],
+            "body": override,
+        }
+    )
+    assert posted_bodies == [override]
+
+
 # ---------------------------------------------------------------------------
 # escalate: only cross-issue decisions touch memory_dir.
 # ---------------------------------------------------------------------------
