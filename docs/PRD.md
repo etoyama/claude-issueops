@@ -159,7 +159,7 @@ Milestone (phase:vX.Y)
 - [CHANGELOG.md](../CHANGELOG.md) — release notes
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — 貢献ガイド (no-ff merge 等)
 - [skills/session-closer/SKILL.md](../skills/session-closer/SKILL.md) — session-closer skill 仕様
-- [.spec-workflow/specs/session-closer/](../.spec-workflow/specs/session-closer/) — v0.1 までの spec doc 群 (legacy、archive 扱い)
+- [docs/legacy/v0.1-spec-workflow/session-closer/](./legacy/v0.1-spec-workflow/session-closer/) — v0.1 までの spec doc 群 (legacy、tracked archive snapshot、[ARCHIVED.md](./legacy/v0.1-spec-workflow/session-closer/ARCHIVED.md) で扱いを明記)。元の `.spec-workflow/specs/` は `.gitignore` で個人 artifacts として ignored
 - [docs/design/](./design/) — v0.2 以降の Epic Living Design Doc (未作成、Meta #69 で導入予定)
 - [Meta #69](https://github.com/etoyama/claude-issueops/issues/69) — 開発プロセス刷新 epic
 - 関連 repo:
