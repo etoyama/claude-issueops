@@ -10,7 +10,7 @@
       "name": "claude-issueops",
       "source": "./",
       "description": "Persist session context and decisions across Claude Code sessions via GitHub Issues",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": {
         "name": "etoyama"
       },
