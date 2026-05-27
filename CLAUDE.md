@@ -4,7 +4,7 @@
 
 claude-issueops は Claude Code セッションで下された **Decision を GitHub Issue コメントに persistent memory として書き戻す** plugin。session-closer skill が中心で、capture/close 2 モードで Decision marker を投稿し、cross-issue scope は project memory に昇格させる。
 
-- 詳細仕様: [docs/PRD.md](./docs/PRD.md) (未作成、[Meta #69](https://github.com/etoyama/claude-issueops/issues/69) のサブタスクで追加予定)
+- 詳細仕様: [docs/PRD.md](./docs/PRD.md)
 - 現フェーズ: **v0.1 released** ([release notes](https://github.com/etoyama/claude-issueops/releases/tag/v0.1.0))、v0.2 / v0.3 計画中
 
 ## 2. 通底原理: 「ツールを使うツールを、そのツールで作る」
