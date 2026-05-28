@@ -217,6 +217,160 @@ def test_handle_resolve_issue_returns_error_when_unresolvable(
 
 
 # ---------------------------------------------------------------------------
+# resolve-issue: --target unified flag (Story 2 #76, Epic 01)
+# ---------------------------------------------------------------------------
+#
+# Story 1 (#77) added the pure-module primitives:
+#   parse_target_spec / resolve_meta_target / TargetSpec / TargetResolutionError
+# Story 2 wires them through bin/session_closer.py:_handle_resolve_issue so
+# a `target` payload field activates a new code path. ``target`` absent
+# keeps the existing Tier 1/2 behaviour (backward compatibility, AC-4).
+
+
+def test_handle_resolve_issue_target_meta_single_returns_issue_number(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    """target=meta + Meta list 1 件 → 即採用、issue_number を返す。"""
+    monkeypatch.setattr(bin_mod, "gh_list_meta_issues", lambda **_kw: [69])
+    # Tier 1 fallback shouldn't be consulted when target is supplied.
+    monkeypatch.setattr(
+        bin_mod, "gh_list_in_progress",
+        lambda **_kw: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    response = bin_mod._handle_resolve_issue(
+        {"target": "meta", "branch": "master", "project_dir": str(tmp_path)}
+    )
+
+    assert response["ok"] is True
+    assert response["result"]["issue_number"] == 69
+
+
+def test_handle_resolve_issue_target_meta_multiple_returns_ambiguous(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    """target=meta + Meta list 複数 → ambiguous_candidates、SKILL.md が AskUserQuestion。"""
+    monkeypatch.setattr(bin_mod, "gh_list_meta_issues", lambda **_kw: [69, 75])
+
+    response = bin_mod._handle_resolve_issue(
+        {"target": "meta", "project_dir": str(tmp_path)}
+    )
+
+    assert response["ok"] is True
+    assert sorted(response["result"]["ambiguous_candidates"]) == [69, 75]
+    assert "issue_number" not in response["result"]
+
+
+def test_handle_resolve_issue_target_meta_empty_returns_target_resolution_error(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    """target=meta + 0 件 → 厳格 error kind=target-resolution (F1)。"""
+    monkeypatch.setattr(bin_mod, "gh_list_meta_issues", lambda **_kw: [])
+
+    response = bin_mod._handle_resolve_issue(
+        {"target": "meta", "project_dir": str(tmp_path)}
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["kind"] == "target-resolution"
+    # hint should help the user recover.
+    assert response["error"].get("hint")
+
+
+def test_handle_resolve_issue_target_issue_returns_value_directly(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    """target=issue:42 → issue_number=42、gh CLI を一切叩かない。"""
+    monkeypatch.setattr(
+        bin_mod, "gh_list_meta_issues",
+        lambda **_kw: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+    monkeypatch.setattr(
+        bin_mod, "gh_list_in_progress",
+        lambda **_kw: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    response = bin_mod._handle_resolve_issue(
+        {"target": "issue:42", "project_dir": str(tmp_path)}
+    )
+
+    assert response["ok"] is True
+    assert response["result"]["issue_number"] == 42
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", "invalid", "meta:42", "issue:", "issue:abc", "issue:0", "story:42", "epic:42"],
+)
+def test_handle_resolve_issue_invalid_target_spec_is_classified(
+    tmp_path: Path, bin_mod, bad: str
+):
+    """target syntax 不正 → ok=false, error.kind=invalid-target-spec。
+
+    SKILL.md 側で先に validate されるべきだが、防御的に bin でも検出して
+    `internal` ではなく専用 kind に分類する (Living Design Doc § 3)。
+    """
+    response = bin_mod._handle_resolve_issue(
+        {"target": bad, "project_dir": str(tmp_path)}
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["kind"] == "invalid-target-spec"
+
+
+def test_handle_resolve_issue_target_meta_gh_failure_classified(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    """gh_list_meta_issues が GhFailure を raise → dispatcher で gh-failure kind に変換。
+
+    Story 2 自身は GhFailure を catch しない (orchestrator-style propagation)。
+    dispatcher の汎用 `except GhFailure` 経路でユーザーに auth/network/rate-limit
+    が伝わることを E2E で pin する。
+    """
+    def _boom(**_kw):
+        raise GhFailure(
+            kind=GhFailureKind.AUTH,
+            stderr="bad credentials",
+            exit_code=1,
+            hint="gh auth status を実行してください",
+        )
+
+    monkeypatch.setattr(bin_mod, "gh_list_meta_issues", _boom)
+
+    response = bin_mod._dispatch(
+        {
+            "schema_version": 1,
+            "subcommand": "resolve-issue",
+            "target": "meta",
+            "project_dir": str(tmp_path),
+        }
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["kind"] == "gh-failure"
+    assert response["error"]["gh_failure_kind"] == "auth"
+
+
+def test_handle_resolve_issue_without_target_keeps_tier12_behavior(
+    tmp_path: Path, bin_mod, monkeypatch: pytest.MonkeyPatch
+):
+    """target 未指定なら Story 1 以前の挙動 (Tier 1/2) を完全に維持する。"""
+    monkeypatch.setattr(bin_mod, "gh_list_in_progress", lambda **_kw: [99])
+    # gh_list_meta_issues must NOT be called when target is absent.
+    monkeypatch.setattr(
+        bin_mod, "gh_list_meta_issues",
+        lambda **_kw: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    response = bin_mod._handle_resolve_issue(
+        {"branch": "master", "project_dir": str(tmp_path)}
+    )
+
+    assert response["ok"] is True
+    assert response["result"]["issue_number"] == 99
+
+
+# ---------------------------------------------------------------------------
 # post-decisions: graceful degradation on per-decision failures.
 # ---------------------------------------------------------------------------
 

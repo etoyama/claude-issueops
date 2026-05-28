@@ -200,7 +200,10 @@ flowchart LR
 
 ### Story 2 (#76): bin + orchestrator wiring
 
-- (未着手)
+- `bin/session_closer.py` `_handle_resolve_issue` に `target` payload 分岐を追加。Story 1 の `parse_target_spec` / `resolve_meta_target` を呼び、`issue_number` / `ambiguous_candidates` / `target-resolution` / `invalid-target-spec` を出し分け
+- `src/issueops/gh_adapters.py` に `gh_list_meta_issues(*, cwd)` を追加 (`gh issue list --label type:meta --state open --json number`、Milestone filter なし)
+- orchestrator (`session_closer.py`) は無改修。`target` 経路でも bin が `issue_number` を返した時点で既存の post / commit / summary / escalate ループに自然に接続される
+- 残課題: SKILL.md (Step 1 / Step 3) で `--target` 引数の抽出と AskUserQuestion fallback、README の Quickstart 例 (Story 3)
 
 ### Story 3 (#78): SKILL.md + docs + Living Design Doc finalize
 
