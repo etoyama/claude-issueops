@@ -40,6 +40,7 @@ __all__ = [
     "gh_view_comments",
     "gh_post_comment",
     "gh_list_in_progress",
+    "gh_list_meta_issues",
     "git_branch",
 ]
 
@@ -263,6 +264,30 @@ def gh_list_in_progress(*, cwd: Path) -> list[int]:
         "gh", "issue", "list",
         "--state", "open",
         "--label", "status:in-progress",
+        "--json", "number",
+        "--limit", "100",
+    ]
+    proc = _run(argv, cwd=cwd)
+    if proc.returncode != 0:
+        raise classify_gh_failure(proc.stderr, proc.returncode)
+    items = json.loads(proc.stdout) if proc.stdout.strip() else []
+    return [int(it["number"]) for it in items if isinstance(it, dict) and "number" in it]
+
+
+def gh_list_meta_issues(*, cwd: Path) -> list[int]:
+    """Return open issue numbers labelled ``type:meta`` (``--target meta``).
+
+    Used by :func:`resolve_meta_target` via the bin layer when the user
+    invokes ``/claude-issueops:session-closer --target meta``. Milestone
+    filtering is intentionally absent — when multiple Metas live across
+    Milestones the result is multi-valued and the SKILL.md layer
+    disambiguates via ``AskUserQuestion`` (Open Question 2 deferred to
+    a future Epic; see ``docs/design/epic-01-target-flag.md`` § 6).
+    """
+    argv = [
+        "gh", "issue", "list",
+        "--state", "open",
+        "--label", "type:meta",
         "--json", "number",
         "--limit", "100",
     ]

@@ -65,12 +65,16 @@ from issueops.gh_adapters import (  # noqa: E402
     PostResult,
     classify_gh_failure,
     gh_list_in_progress,
+    gh_list_meta_issues,
     gh_post_comment,
     gh_view_comments,
 )
 from issueops.issue_resolver import (  # noqa: E402
     AmbiguousResolution,
     IssueResolutionError,
+    TargetResolutionError,
+    parse_target_spec,
+    resolve_meta_target,
     resolve_target_issue,
 )
 from issueops.marker_parser import Decision, parse_decisions  # noqa: E402
@@ -193,15 +197,33 @@ def _handle_read_transcript(payload: dict[str, Any]) -> dict[str, Any]:
     return _ok({"content": sliced.content, "end_offset": sliced.end_offset})
 
 
-def _handle_resolve_issue(payload: dict[str, Any]) -> dict[str, Any]:
-    """Resolve target issue via Tier 1 (gh in-progress) + Tier 2 (branch).
+_TARGET_RESOLUTION_HINT = (
+    "Meta Issue を `type:meta` ラベル付きで起票するか、"
+    "`--target issue:N` で番号指定するか、フラグ無しで通常 fallback を使ってください"
+)
 
-    Maps to ``resolve-issue`` (R-6). ``branch`` defaults to ``""`` so a
-    detached HEAD or unavailable git falls through to AmbiguousResolution
-    or IssueResolutionError per the state-transition table.
+
+def _handle_resolve_issue(payload: dict[str, Any]) -> dict[str, Any]:
+    """Resolve target issue via either ``--target`` (Story 2 / Epic 01) or
+    the legacy Tier 1 (gh in-progress) + Tier 2 (branch) path.
+
+    Maps to ``resolve-issue`` (R-6). When ``payload["target"]`` is
+    supplied, the new path runs: ``parse_target_spec`` validates syntax
+    and ``resolve_meta_target`` queries the Meta-issues list. When
+    absent, the legacy two-tier resolver runs unchanged (R-6 backward
+    compatibility).
+
+    ``branch`` defaults to ``""`` so a detached HEAD or unavailable git
+    falls through to AmbiguousResolution or IssueResolutionError per the
+    state-transition table.
     """
-    branch = str(payload.get("branch") or "")
     cwd = _project_dir(payload)
+
+    target_raw = payload.get("target")
+    if target_raw is not None:
+        return _resolve_with_target(str(target_raw), cwd)
+
+    branch = str(payload.get("branch") or "")
 
     def _list() -> list[int]:
         return gh_list_in_progress(cwd=cwd)
@@ -221,6 +243,60 @@ def _handle_resolve_issue(payload: dict[str, Any]) -> dict[str, Any]:
         # split-field shape was bin-internal drift (#29).
         return _ok({"ambiguous_candidates": list(result.candidates)})
     return _ok({"issue_number": int(result)})
+
+
+def _resolve_with_target(target_raw: str, cwd: Path) -> dict[str, Any]:
+    """Resolve the ``--target`` payload (Story 2 / Epic 01).
+
+    Error kinds (see ``docs/design/epic-01-target-flag.md`` § 3):
+
+    - ``invalid-target-spec`` — syntax that :func:`parse_target_spec`
+      rejects (``story:N`` / ``epic:N`` / typos / etc.). SKILL.md is
+      expected to pre-validate but bin defends.
+    - ``target-resolution`` — syntax is valid but no concrete issue can
+      be resolved (currently only fires for ``--target meta`` with zero
+      open Metas — F1 strict-error decision).
+    """
+    try:
+        spec = parse_target_spec(target_raw)
+    except ValueError as exc:
+        return _err("invalid-target-spec", str(exc))
+
+    if spec.kind == "issue":
+        # parse_target_spec + TargetSpec.__post_init__ guarantee value is a
+        # positive int for kind=issue, but we check explicitly because
+        # ``assert`` would be stripped under python -O (NFR Reliability).
+        if spec.value is None:
+            return _err(
+                "invalid-target-spec",
+                "issue target requires a positive int value",
+            )
+        return _ok({"issue_number": spec.value})
+
+    if spec.kind == "meta":
+        def _list_meta() -> list[int]:
+            return gh_list_meta_issues(cwd=cwd)
+
+        try:
+            result = resolve_meta_target(list_meta_fn=_list_meta)
+        except TargetResolutionError as exc:
+            return _err(
+                "target-resolution",
+                str(exc),
+                hint=_TARGET_RESOLUTION_HINT,
+            )
+        if isinstance(result, AmbiguousResolution):
+            return _ok({"ambiguous_candidates": list(result.candidates)})
+        return _ok({"issue_number": int(result)})
+
+    # Unreachable in practice — parse_target_spec rejects story / epic
+    # before we get here. Kept as a defence-in-depth branch so a future
+    # parser extension that emits a new kind without updating this
+    # dispatch surfaces a clear error instead of returning ``None``.
+    return _err(
+        "invalid-target-spec",
+        f"target kind {spec.kind!r} is not yet supported",
+    )
 
 
 def _handle_filter_dedup(payload: dict[str, Any]) -> dict[str, Any]:
