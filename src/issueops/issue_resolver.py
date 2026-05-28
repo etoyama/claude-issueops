@@ -25,9 +25,10 @@ rationale.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Union
+from typing import Literal, Union
 
 from issueops.branch_resolver import (
     DEFAULT_BRANCH_PATTERN,
@@ -37,9 +38,15 @@ from issueops.branch_resolver import (
 __all__ = [
     "AmbiguousResolution",
     "IssueResolutionError",
+    "TargetResolutionError",
+    "TargetSpec",
+    "parse_target_spec",
+    "resolve_meta_target",
     "resolve_target_issue",
     "DEFAULT_BRANCH_PATTERN",
 ]
+
+TargetKind = Literal["meta", "issue", "story", "epic"]
 
 
 class IssueResolutionError(Exception):
@@ -47,6 +54,48 @@ class IssueResolutionError(Exception):
 
     Maps to design state-table row 1 (Tier 1 = 0 件, branch_resolver = None).
     """
+
+
+class TargetResolutionError(Exception):
+    """Raised when ``--target`` cannot be resolved to a concrete issue.
+
+    Currently fires when ``--target meta`` finds zero Meta Issues
+    (F1 strict-error design decision — see Epic 01 Living Design Doc).
+    The bin handler converts this to the ``target-resolution`` error kind.
+    """
+
+
+@dataclass(frozen=True)
+class TargetSpec:
+    """User-supplied ``--target`` argument, normalised.
+
+    ``kind`` covers the full future-reserved set even though
+    :func:`parse_target_spec` currently only accepts ``meta`` and ``issue``;
+    keeping the Literal wide means adding ``story`` / ``epic`` support later
+    is a parser-only change, not a Value Object signature break.
+
+    The ``(kind, value)`` invariant is enforced in ``__post_init__`` so
+    construction outside :func:`parse_target_spec` (e.g. direct calls
+    from tests or future bin code) cannot land in an inconsistent state.
+    """
+
+    kind: TargetKind
+    value: int | None  # ``meta`` has no value; ``issue:N`` carries N.
+
+    def __post_init__(self) -> None:
+        if self.kind == "meta":
+            if self.value is not None:
+                raise ValueError("meta target must not carry a value")
+        else:
+            if self.value is None or self.value <= 0:
+                raise ValueError(
+                    f"{self.kind!r} target requires a positive int value"
+                )
+
+
+# Positive-integer match is enforced by the regex itself (`[1-9][0-9]*`)
+# so callers do not need to defend against `kind:0` separately.
+_TARGET_KV_RE = re.compile(r"^(issue|story|epic):([1-9][0-9]*)$")
 
 
 @dataclass(frozen=True)
@@ -126,3 +175,74 @@ def resolve_target_issue(
 
     # Rows 6 / 7: no usable Tier 2 → defer to user.
     return AmbiguousResolution(candidates=tier1)
+
+
+def parse_target_spec(raw: str) -> TargetSpec:
+    """Parse ``--target`` raw string into a :class:`TargetSpec`.
+
+    Accepted forms:
+
+    - ``"meta"`` → ``TargetSpec(kind="meta", value=None)``
+    - ``"issue:<positive int>"`` → ``TargetSpec(kind="issue", value=N)``
+
+    ``story:N`` / ``epic:N`` are syntactically recognised but reserved for
+    a future Epic — they raise :class:`ValueError` here. SKILL.md should
+    validate user input up-front; the bin layer falls back to converting
+    any ``ValueError`` from this function into the ``invalid-target-spec``
+    error kind.
+    """
+    if raw == "meta":
+        return TargetSpec(kind="meta", value=None)
+
+    match = _TARGET_KV_RE.match(raw)
+    if match is None:
+        raise ValueError(
+            f"invalid target spec: {raw!r} (expected 'meta' or 'issue:<int>')"
+        )
+
+    kind, value_str = match.group(1), match.group(2)
+    if kind != "issue":
+        # ``story`` / ``epic`` are reserved for a future Epic. The dataclass
+        # Literal accepts them; the parser does not — see TargetSpec docstring.
+        raise ValueError(
+            f"target kind {kind!r} is reserved for a future release; "
+            "use 'issue:N' to address it explicitly"
+        )
+    return TargetSpec(kind="issue", value=int(value_str))
+
+
+def resolve_meta_target(
+    *,
+    list_meta_fn: Callable[[], list[int]],
+) -> Union[int, AmbiguousResolution]:
+    """Resolve ``--target meta`` to a single Meta Issue number.
+
+    Parameters
+    ----------
+    list_meta_fn:
+        Zero-arg callable returning open Meta Issue numbers in the current
+        Milestone. Injected so this module stays subprocess-free.
+
+    Returns
+    -------
+    int
+        When exactly one Meta Issue is found.
+    AmbiguousResolution
+        When multiple Meta Issues are open; the caller (SKILL.md) asks the
+        user to disambiguate via AskUserQuestion.
+
+    Raises
+    ------
+    TargetResolutionError
+        When the list is empty. ``--target meta`` is an explicit user
+        intent, so silently falling back is hostile — we surface the error
+        and let the SKILL.md layer present guidance (F1 strict-error).
+    """
+    candidates = list(list_meta_fn())
+    if not candidates:
+        raise TargetResolutionError(
+            "no open Meta issues found in the current Milestone"
+        )
+    if len(candidates) == 1:
+        return candidates[0]
+    return AmbiguousResolution(candidates=candidates)

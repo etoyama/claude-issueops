@@ -27,6 +27,10 @@ import pytest
 from issueops.issue_resolver import (
     AmbiguousResolution,
     IssueResolutionError,
+    TargetResolutionError,
+    TargetSpec,
+    parse_target_spec,
+    resolve_meta_target,
     resolve_target_issue,
 )
 
@@ -131,3 +135,122 @@ def test_resolve_total_failure_raises(gh_list_in_progress_fn_factory) -> None:
 
     with pytest.raises(IssueResolutionError):
         resolve_target_issue(branch="master", list_in_progress_fn=list_fn)
+
+
+# ---------------------------------------------------------------------------
+# Story 1 (#77): TargetSpec + parse_target_spec
+# ---------------------------------------------------------------------------
+#
+# Epic 01 (#75): `--target` 統合フラグの pure module 層。
+# parse_target_spec はユーザー入力 (`"meta"` / `"issue:N"`) を Value Object に
+# 正規化する。`story:N` / `epic:N` は kind Literal には含まれるが、本 Epic では
+# 未実装で ValueError を返す (将来予約)。bin/SKILL.md からはこの ValueError を
+# `invalid-target-spec` error kind に変換する (Story 2 で配線)。
+
+
+def test_parse_target_spec_meta_has_no_value() -> None:
+    """`"meta"` is the no-value form: kind=meta, value=None."""
+    spec = parse_target_spec("meta")
+    assert spec == TargetSpec(kind="meta", value=None)
+
+
+def test_parse_target_spec_issue_carries_int_value() -> None:
+    """`"issue:42"` → kind=issue, value=42 (int, not str)."""
+    spec = parse_target_spec("issue:42")
+    assert spec == TargetSpec(kind="issue", value=42)
+    assert isinstance(spec.value, int)
+
+
+@pytest.mark.parametrize("raw", ["story:42", "epic:42"])
+def test_parse_target_spec_future_kinds_raise(raw: str) -> None:
+    """`story:N` / `epic:N` は kind Literal には含まれるが本 Epic 未対応。"""
+    with pytest.raises(ValueError):
+        parse_target_spec(raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",            # empty
+        "invalid",    # no colon, not "meta"
+        "meta:42",   # meta does not take a value
+        "issue",      # missing value
+        "issue:",    # empty value
+        "issue:abc",  # non-int value
+        "issue:-1",   # negative
+        "issue:0",    # zero (not a real issue number)
+        "ISSUE:42",   # case-sensitive — lowercase only
+        " meta",     # leading space
+        "meta ",     # trailing space
+        "issue: 42",  # space inside value
+    ],
+)
+def test_parse_target_spec_invalid_raises(raw: str) -> None:
+    """syntax 不正は ValueError。bin が `invalid-target-spec` に変換する想定。"""
+    with pytest.raises(ValueError):
+        parse_target_spec(raw)
+
+
+def test_target_spec_is_frozen() -> None:
+    """TargetSpec は Value Object なので mutate できない。"""
+    spec = parse_target_spec("issue:42")
+    with pytest.raises((AttributeError, TypeError)):
+        spec.value = 99  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "kind,value",
+    [
+        ("meta", 1),       # meta must not carry a value
+        ("issue", None),   # issue requires a value
+        ("issue", 0),      # non-positive
+        ("issue", -1),
+        ("story", None),   # future kinds also require a positive value
+        ("epic", 0),
+    ],
+)
+def test_target_spec_invariant_rejects_inconsistent_pairs(kind: str, value: int | None) -> None:
+    """Direct construction (bypassing the parser) must enforce the (kind, value) invariant."""
+    with pytest.raises(ValueError):
+        TargetSpec(kind=kind, value=value)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Story 1 (#77): resolve_meta_target
+# ---------------------------------------------------------------------------
+#
+# 0 件: 厳格 error (TargetResolutionError、F1 設計判断)
+# 1 件: int
+# 複数件: AmbiguousResolution (SKILL.md の AskUserQuestion へ)
+
+
+def test_resolve_meta_target_empty_raises() -> None:
+    """0 件は厳格 error。bin が `target-resolution` error kind に変換する。"""
+    with pytest.raises(TargetResolutionError):
+        resolve_meta_target(list_meta_fn=lambda: [])
+
+
+def test_resolve_meta_target_single_returns_int() -> None:
+    """1 件は即採用、AskUserQuestion は経由しない。"""
+    result = resolve_meta_target(list_meta_fn=lambda: [69])
+    assert result == 69
+    assert isinstance(result, int)
+
+
+def test_resolve_meta_target_multiple_returns_ambiguous() -> None:
+    """複数件は AmbiguousResolution、ordering を保つ。"""
+    result = resolve_meta_target(list_meta_fn=lambda: [69, 75])
+    assert isinstance(result, AmbiguousResolution)
+    assert result.candidates == (69, 75)
+
+
+def test_resolve_meta_target_calls_fn_once() -> None:
+    """副作用境界 (gh CLI) への問い合わせは 1 回だけ。"""
+    calls: list[int] = []
+
+    def list_fn() -> list[int]:
+        calls.append(1)
+        return [69]
+
+    resolve_meta_target(list_meta_fn=list_fn)
+    assert len(calls) == 1
