@@ -194,7 +194,9 @@ flowchart LR
 
 ### Story 1 (#77): pure module
 
-- (未着手)
+- `src/issueops/issue_resolver.py` に `TargetSpec` (frozen Value Object + `__post_init__` invariant)、`TargetResolutionError`、`parse_target_spec`、`resolve_meta_target` を追加 (PR: feat/77-target-spec-pure-module)
+- regex は `^(issue|story|epic):[1-9][0-9]*$` で positive int を 1 箇所に集約。bin / SKILL.md の配線は Story 2 で実施
+- 残課題: bin adapter (`bin/session_closer.py` `_handle_resolve_issue`) で `target` payload を受けて新 API を呼ぶ配線、`list_meta_fn` の gh CLI 実装 (Open Question 1: label 厳格 / Open Question 2: current Milestone の取得方法)
 
 ### Story 2 (#76): bin + orchestrator wiring
 
